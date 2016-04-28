@@ -1,0 +1,23 @@
+# rules for talking with BrainCorporation Morsa firmware through usb
+
+# mule device
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5710", \
+    MODE:="0666", \
+    SYMLINK+="lowsheen_%n"
+
+# for flashing board in DFU (Device Firmware Upgrade) mode
+# 0483:df11 - STM32F4 Discovery in DFU mode (CN5)
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="df11", \
+    MODE:="0666"
+
+# stm32 discovery boards, with onboard st/linkv2, i.e. STM32L, STM32F4.
+# STM32VL has st/linkv1, which is quite different
+
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="3748", \
+    MODE:="0666", \
+    SYMLINK+="stlinkv2_%n"
+
+# If you share your linux system with other users, or just don't like the
+# idea of write permission for everybody, you can replace MODE:="0666" with
+# OWNER:="yourusername" to create the device owned by you, or with
+# GROUP:="somegroupname" and mange access using standard unix groups.
