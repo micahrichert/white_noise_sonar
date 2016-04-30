@@ -30,3 +30,6 @@
 *.elf
 
 *~
+
+libopencm3/*
+stlink/*
