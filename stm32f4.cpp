@@ -8,18 +8,15 @@
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/usart.h>
-#include <libopencm3/stm32/adc.h>
 #include <libopencm3/stm32/f4/rng.h>
 #include <stdio.h>
 
 #define NR_OUTPUTS 1 // can't be more than 8
 #define NR_INPUTS 1
-#define MAX_DISTANCE 0.5//5.0 // m
+#define MAX_DISTANCE 1.5//5.0 // m
 #define SAMPLE_STEP_SIZE 1 // integer
-#define TIME_LAG 0.00025 // s, time to shift xcor analysis by to compensate for speaker lag
+#define TIME_LAG 0.0000 // s, time to shift xcor analysis by to compensate for speaker lag
 #define XCOR_DECAY_TIME 1.000 // s
-#define INPUT_BITS 12
-#define INPUT_MEAN 1700//((1<<INPUT_BITS)/2) // input bit precision /2
 #define SIGMA 3 // how many standard deviations greater than chance should be considered significant
 //#define MAX_SAMPLE_RATE 35933 // Hz //2in, 2out at 0.5m
 //#define MAX_SAMPLE_RATE 43206 // Hz //1in, 2out at 0.5m
@@ -34,6 +31,7 @@
 #define XCOR_DECAY_RATE (1.0-1.0/XCOR_DECAY_SAMPLES)
 #define SIGMA2 (SIGMA*SIGMA) // the code works with variance instead of standard deviation
 #define SAMPLE_LAG (int(TIME_LAG*SAMPLE_RATE)+1) // add 1 because inputs are always sampled time step behind
+#define HISTORY_LEN (NR_INPUTS/32+1)
 
 /// maximum length of single message sent via SERIAL_send_string or SERIAL_printf
 #define SERIAL_MESSAGE_SIZE (1024*3)
@@ -214,21 +212,11 @@ uint32_t get_ms_from_start()
     return time_ms;
 }
 
-inline uint32_t pin_to_ADC(uint8_t apin)
-{
-    if (apin == 0) return ADC1;
-    else if (apin == 1) return ADC2;
-    return ADC3;
-}
-
 void setup()
 {
     clock_setup();
     serial_init(115200L*4);
     serial_printf(true, "Starting up\r\n");
-
-    rcc_periph_clock_enable(RCC_GPIOD);
-    gpio_mode_setup(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1<<15);
 
     rcc_periph_clock_enable(RCC_GPIOB);
 
@@ -237,41 +225,15 @@ void setup()
         gpio_mode_setup(GPIOB, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1<<dpin); // Use PB0...
     }
     
-    //setup ADCs
 	rcc_periph_clock_enable(RCC_GPIOA);
-	rcc_periph_clock_enable(RCC_ADC1);
-	rcc_periph_clock_enable(RCC_ADC2);
-	rcc_periph_clock_enable(RCC_ADC3);
 
 	for (uint8_t apin=0; apin<NR_INPUTS; apin++)
 	{
-	    uint32_t adc = pin_to_ADC(apin);
-
-        gpio_mode_setup(GPIOA, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, 1<<apin); // Use PA0...
-	
-	    adc_off(adc);
-
-	    adc_disable_external_trigger_regular(adc);
-	    adc_disable_scan_mode(adc);
-	    adc_disable_eoc_interrupt(adc);
-//	    adc_set_single_conversion_mode(adc);
-        adc_set_continuous_conversion_mode(adc);
-	    adc_set_sample_time_on_all_channels(adc, ADC_SMPR_SMP_144CYC); // need to play with this value and the prescaler
-        adc_set_clk_prescale(ADC_CCR_ADCPRE_BY8);  // prescaler defaults to 2 at startup
-//        ADC_CR1(adc) |= (2 << 24); // 8-bit mode
-        adc_power_on(adc);
+        gpio_mode_setup(GPIOA, GPIO_MODE_INPUT, GPIO_PUPD_NONE, 1<<apin); // Use PA0...
     }
     
 	rcc_periph_clock_enable(RCC_RNG);
 	RNG_CR |= RNG_CR_RNGEN;
-}
-
-uint32_t fast_rand(uint32_t x)
-{
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    return x;
 }
 
 uint32_t real_rand()
@@ -280,33 +242,43 @@ uint32_t real_rand()
     return RNG_DR;
 }
 
+inline void shift_left_or(uint32_t* buf, int or_val, int len)
+{
+    for (int i=len-1;i>=0;i--)
+    {
+        int next_val = i>0?(buf[i-1]>>31):or_val;
+        buf[i] <<= 1;
+        buf[i] |= next_val;
+    }
+}
+
+inline void shift_right(uint32_t* buf, int bits, int len)
+{
+    for (int i=0;i<len;i++)
+    {
+        int next_val = (i<(len-1))?buf[i+1]:0;
+        buf[i] >>= bits;
+        buf[i] |= (next_val<<(32-bits));
+    }
+}
+
 int main(void)
 {
 // p = desired significance threshold for statistical significance, should be determined from desired false positive rate corrected for number of comparisons (NR_INPUTS*NR_SAMPLES*NR_OUTPUTS)
 // sigma = norm_inverse_cdf(p/2), divide by 2 because we are using a single-tailed test.
 // significant if xcors**2 > sum((input-mean_input)**2)*sigma**2
 
-    int16_t rand_hist[NR_SAMPLES*SAMPLE_STEP_SIZE+SAMPLE_LAG][NR_OUTPUTS] = {0}; // need one extra slot due to the analog value being delayed by 1 cycle
-    int16_t rand_hist_pos;
+    uint32_t rand_hist[NR_OUTPUTS][HISTORY_LEN] = {0}; // need one extra slot due to the analog value being delayed by 1 cycle
+    uint32_t shifted_rand_hist[NR_OUTPUTS][HISTORY_LEN];
     int32_t xcors[NR_INPUTS][NR_SAMPLES][NR_OUTPUTS] = {0};
-    int16_t prev_input[NR_INPUTS];
-    float cum_input2[NR_INPUTS];
+    uint32_t input[NR_INPUTS] = {0};
     int32_t t = 0;
     uint32_t start_time = 0;
     uint32_t rnd = 0;
-    int decay_i = 0;
-    int adc_too_slow = false;
+    uint8_t calc_phase = 0;
 
     setup();
     
-    // select a2d input pin and start the conversion
-    for (uint8_t apin=0; apin<NR_INPUTS; apin++)
-    {
-	    uint32_t adc = pin_to_ADC(apin);
-        adc_set_regular_sequence(adc, 1, &apin);
-    	adc_start_conversion_regular(adc);
-    }
-
     while (true)
     {
         int start=time_ms;
@@ -314,48 +286,46 @@ int main(void)
 
         for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
         {
-            int r = (rnd&(1<<dpin)) > 0;
-            rand_hist[rand_hist_pos][dpin] = r*2-1;
+            int r = (rnd&(1<<dpin))>>dpin;
+            shift_left_or(rand_hist[dpin], r, HISTORY_LEN);
             if (r) gpio_set(GPIOB, 1<<dpin);
             else gpio_clear(GPIOB, 1<<dpin);
         }
 
-        for (int i=NR_SAMPLES-1, pos=rand_hist_pos-SAMPLE_LAG; i>=0; i--)
+        memcpy(shifted_rand_hist, rand_hist, sizeof(rand_hist));
+        int i = calc_phase;
+        for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
         {
-            pos += (pos-SAMPLE_STEP_SIZE < 0) ? (NR_SAMPLES*SAMPLE_STEP_SIZE+SAMPLE_LAG): (-SAMPLE_STEP_SIZE);
+            shift_right(shifted_rand_hist[dpin], calc_phase+SAMPLE_LAG, HISTORY_LEN);
+        }
+        do
+        {
             //compute actual xcross-correlation
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
                 for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
                 {
-                    xcors[apin][i][dpin] += rand_hist[pos][dpin] * prev_input[apin];
+                    uint32_t matches = shifted_rand_hist[dpin][0] ^ input[apin];
+                    xcors[apin][i][dpin] = int32_t(0.999 * xcors[apin][i][dpin]) + __builtin_popcount(matches) - 16; // count the number of 1s in the 32 bits and subtract the mean
                 }
             }
-        }
 
-        // decay and test for significance here
-        decay_i++;
-        if (decay_i >= NR_SAMPLES) decay_i = 0;
-        for (uint8_t apin=0; apin<NR_INPUTS; apin++)
-        {
             for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
             {
-                xcors[apin][decay_i][dpin] *= (1.0-1.0/511.0);//(1<<9));
+                shift_right(shifted_rand_hist[dpin], 32, HISTORY_LEN);
             }
-        }
+            
+            i += 32;
+        } while (i<NR_SAMPLES);
+        calc_phase++;
+        calc_phase &= 31;
 
-        rand_hist_pos += 1;
-        if (rand_hist_pos >= NR_SAMPLES*SAMPLE_STEP_SIZE+1) rand_hist_pos = 0;
-
-        // wait for a2d to finish and read sample
         for (uint8_t apin=0; apin<NR_INPUTS; apin++)
         {
-    	    uint32_t adc = pin_to_ADC(apin);
-            if (!adc_eoc(adc)) adc_too_slow = true;
-            
-            prev_input[apin] = adc_read_regular(adc) - INPUT_MEAN;
-            cum_input2[apin] = cum_input2[apin]*(1.0-1.0/(1<<9)/NR_SAMPLES) + ((prev_input[apin]*prev_input[apin]));//>>(12*2+16-31));
+            input[apin] <<= 1;
+            input[apin] |= gpio_get(GPIOA, 1<<apin);
         }
+
         t += 1;
         if (t >= XCOR_DECAY_SAMPLES)
         {
@@ -365,20 +335,18 @@ int main(void)
             {
                 for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
                 {
-                    uint32_t var = cum_input2[apin]/(1<<((16+12-31/2)*2));
-                    serial_printf(false, "%d %d, %d: ", apin, dpin, var);//-(12*2+16-31)));
-                    for (int16_t i=NR_SAMPLES-1;i>=0;i--)
+                    serial_printf(false, "%d %d: ", apin, dpin);//-(12*2+16-31)));
+                    for (int16_t i=0;i<NR_SAMPLES;i++)
                     {
-                        int32_t tmp = xcors[apin][i][dpin]>>(16+12-31/2);
-                        serial_printf(false, "%5d", (tmp*tmp)/var/SIGMA2);
+                        int32_t tmp = xcors[apin][i][dpin];
+                        serial_printf(false, "%5d", (tmp*tmp)/SIGMA2/XCOR_DECAY_SAMPLES);
                     }
                     serial_printf(false, "\r\n");
                 }
             }
             serial_printf_flush();
-            serial_printf(false, "%d %d %s\r\n", time - start_time, get_ms_from_start() - time, adc_too_slow?"adc too slow":"");
+            serial_printf(false, "%d %d\r\n", time - start_time, get_ms_from_start() - time);
             start_time = get_ms_from_start();
-            adc_too_slow = false;
         }
     }
 }
