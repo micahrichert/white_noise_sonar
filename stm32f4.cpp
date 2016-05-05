@@ -14,35 +14,31 @@
 #define NR_OUTPUTS 1 // can't be more than 8
 #define NR_INPUTS 1
 #define MAX_DISTANCE 1.5//5.0 // m
-#define SAMPLE_STEP_SIZE 1 // integer
 #define TIME_LAG 0.0000 // s, time to shift xcor analysis by to compensate for speaker lag
 #define XCOR_DECAY_TIME 1.000 // s
-#define SIGMA 3 // how many standard deviations greater than chance should be considered significant
-//#define MAX_SAMPLE_RATE 35933 // Hz //2in, 2out at 0.5m
-//#define MAX_SAMPLE_RATE 43206 // Hz //1in, 2out at 0.5m
-//#define MAX_SAMPLE_RATE 47175 // Hz //3in, 1out at 0.5m
-//#define MAX_SAMPLE_RATE 50666 // Hz //2in, 1out at 0.5m
-#define MAX_SAMPLE_RATE 56000 // Hz //1in, 1out at 0.5m
+#define SIGMA 1.0 // how many standard deviations greater than chance should be considered significant
+//#define MAX_SAMPLE_RATE 40500 // Hz //2in, 2out at 1.5m
+//#define MAX_SAMPLE_RATE 57500 // Hz //1in, 2out at 1.5m
+//#define MAX_SAMPLE_RATE 47500 // Hz //3in, 1out at 1.5m
+//#define MAX_SAMPLE_RATE 58000 // Hz //2in, 1out at 1.5m
+#define MAX_SAMPLE_RATE 79000 // Hz //1in, 1out at 1.5m
 #define SPEED_OF_SOUND (340.3/2.0) // m/s, divide by 2 because sound travels out and back
 #define SAMPLE_RATE (MAX_SAMPLE_RATE)
 #define DISTANCE_PER_SAMPLE (SPEED_OF_SOUND/SAMPLE_RATE)
-#define NR_SAMPLES (int(MAX_DISTANCE/DISTANCE_PER_SAMPLE)/SAMPLE_STEP_SIZE)
+#define NR_SAMPLES (int(MAX_DISTANCE/DISTANCE_PER_SAMPLE))
 #define XCOR_DECAY_SAMPLES (int(SAMPLE_RATE * XCOR_DECAY_TIME))
 #define XCOR_DECAY_RATE (1.0-1.0/XCOR_DECAY_SAMPLES)
 #define SIGMA2 (SIGMA*SIGMA) // the code works with variance instead of standard deviation
 #define SAMPLE_LAG (int(TIME_LAG*SAMPLE_RATE)+1) // add 1 because inputs are always sampled time step behind
-#define HISTORY_LEN (NR_INPUTS/32+1)
+#define HISTORY_LEN (NR_SAMPLES/32+1)
 
-/// maximum length of single message sent via SERIAL_send_string or SERIAL_printf
-#define SERIAL_MESSAGE_SIZE (1024*3)
-/// maximum amount of characters that can be buffered between SERIAL_printf_poll() calls
-#define SERIAL_MESSAGE_BUFFER_SIZE (SERIAL_MESSAGE_SIZE)
+#define SERIAL_MESSAGE_BUFFER_SIZE (1024*10)
 
 static char            tx_buffer[2][SERIAL_MESSAGE_BUFFER_SIZE];
 static uint32_t        num_chars_to_send = 0;
 static uint32_t        available_buffer  = 0;
 static volatile bool   transfer_complete = true;
-static char            printf_buffer[SERIAL_MESSAGE_SIZE];
+static char            printf_buffer[SERIAL_MESSAGE_BUFFER_SIZE];
 
 void dma1_stream3_isr()
 {
@@ -143,7 +139,7 @@ void serial_printf_helper(bool block, const char* pFormat, ...)
     uint32_t     num_written;
 
     va_start(ap, pFormat);
-    num_written = vsnprintf(printf_buffer, SERIAL_MESSAGE_SIZE, pFormat, ap);
+    num_written = vsnprintf(printf_buffer, SERIAL_MESSAGE_BUFFER_SIZE, pFormat, ap);
     va_end(ap);
     if (num_written > 0)
     {
@@ -242,24 +238,43 @@ uint32_t real_rand()
     return RNG_DR;
 }
 
-inline void shift_left_or(uint32_t* buf, int or_val, int len)
+inline void insert_bit(uint32_t* buf, bool bit, int16_t loc)
 {
-    for (int i=len-1;i>=0;i--)
+    int i = loc / 32;
+    int offset = loc % 32;
+    buf[i] = (buf[i]&(~(1<<offset))) | (bit << offset);
+}  
+
+inline void circ_copy_bits(uint32_t* dst, uint32_t* src, uint16_t loc, uint16_t num_int32s)
+{
+    int i = loc / 32;
+    int offset = loc % 32;
+    uint32_t first_bits=src[i], second_bits, ind=0;
+    uint16_t num_copied = 0;
+    i++;
+    for (; i<num_int32s; i++, num_copied++)
     {
-        int next_val = i>0?(buf[i-1]>>31):or_val;
-        buf[i] <<= 1;
-        buf[i] |= next_val;
+        second_bits=src[i];
+        dst[num_copied] = (second_bits<<(32-offset)) | (first_bits>>offset);
+        first_bits = second_bits;
+    }
+    i = 0;
+    for (; num_copied<num_int32s; i++, num_copied++)
+    {
+        second_bits=src[i];
+        dst[num_copied] = (second_bits<<(32-offset)) | (first_bits>>offset);
+        first_bits = second_bits;
     }
 }
 
-inline void shift_right(uint32_t* buf, int bits, int len)
+inline uint32_t get_32bits(uint32_t* buf, int16_t loc, uint16_t num_bits)
 {
-    for (int i=0;i<len;i++)
-    {
-        int next_val = (i<(len-1))?buf[i+1]:0;
-        buf[i] >>= bits;
-        buf[i] |= (next_val<<(32-bits));
-    }
+    if (loc > num_bits) loc -= num_bits;
+    if (loc < 0) loc += num_bits;
+    int i = loc / 32;
+    int offset = loc % 32;
+    
+    return (buf[i+1]<<(32-offset)) | (buf[i]>>offset);
 }
 
 int main(void)
@@ -269,57 +284,70 @@ int main(void)
 // significant if xcors**2 > sum((input-mean_input)**2)*sigma**2
 
     uint32_t rand_hist[NR_OUTPUTS][HISTORY_LEN] = {0}; // need one extra slot due to the analog value being delayed by 1 cycle
-    uint32_t shifted_rand_hist[NR_OUTPUTS][HISTORY_LEN];
-    int32_t xcors[NR_INPUTS][NR_SAMPLES][NR_OUTPUTS] = {0};
+    int32_t xcors[NR_SAMPLES][NR_INPUTS][NR_OUTPUTS] = {0};
+    #define XCOR(i, dpin, apin) xcors[i][apin][dpin]
     uint32_t input[NR_INPUTS] = {0};
     int32_t t = 0;
     uint32_t start_time = 0;
     uint32_t rnd = 0;
-    uint8_t calc_phase = 0;
+    uint8_t calc_phase = ((-SAMPLE_LAG) & 31);
+    int16_t bit_pos = 0;
+    int hist_i, xcor_i;
+    int decay_i = 0;
 
     setup();
     
     while (true)
     {
         int start=time_ms;
-        uint32_t rnd = real_rand();
+        rnd = real_rand();
 
         for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
         {
             int r = (rnd&(1<<dpin))>>dpin;
-            shift_left_or(rand_hist[dpin], r, HISTORY_LEN);
+            insert_bit(rand_hist[dpin], r, bit_pos);
             if (r) gpio_set(GPIOB, 1<<dpin);
             else gpio_clear(GPIOB, 1<<dpin);
         }
 
-        memcpy(shifted_rand_hist, rand_hist, sizeof(rand_hist));
-        int i = calc_phase;
-        for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
-        {
-            shift_right(shifted_rand_hist[dpin], calc_phase+SAMPLE_LAG, HISTORY_LEN);
-        }
+        hist_i = (bit_pos+31)/32; // the 32bits we want start 31 bits back (positive values are back in time)
+        xcor_i = calc_phase;
         do
         {
-            //compute actual xcross-correlation
+            if (hist_i>=HISTORY_LEN) hist_i-=HISTORY_LEN;
+            if (hist_i<0) hist_i+=HISTORY_LEN;
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
+                uint32_t input_apin = input[apin];
                 for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
                 {
-                    uint32_t matches = shifted_rand_hist[dpin][0] ^ input[apin];
-                    xcors[apin][i][dpin] = int32_t(0.999 * xcors[apin][i][dpin]) + __builtin_popcount(matches) - 16; // count the number of 1s in the 32 bits and subtract the mean
+                    uint32_t shift_hist = rand_hist[dpin][hist_i];
+                    
+                    //compute actual xcross-correlation
+                    XCOR(xcor_i, dpin, apin) -= __builtin_popcount(shift_hist ^ input_apin) - 16; // count the number of 1s in the 32 bits and subtract the mean
                 }
             }
-
-            for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
-            {
-                shift_right(shifted_rand_hist[dpin], 32, HISTORY_LEN);
-            }
             
-            i += 32;
-        } while (i<NR_SAMPLES);
+            xcor_i += 32;
+            hist_i++;
+        } while (xcor_i<NR_SAMPLES);
         calc_phase++;
-        calc_phase &= 31;
+        calc_phase %= 32;
+        bit_pos--;
+        if (bit_pos<0) bit_pos += HISTORY_LEN*32;
 
+        // decay and detect significant values        
+        for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
+        {
+            for (uint8_t apin=0; apin<NR_INPUTS; apin++)
+            {
+                XCOR(decay_i, dpin, apin) *= 1.0 - 1.0/(XCOR_DECAY_SAMPLES/float(NR_SAMPLES));
+            }
+        }
+        decay_i++;
+        if (decay_i >= NR_SAMPLES) decay_i = 0;
+
+        // read input
         for (uint8_t apin=0; apin<NR_INPUTS; apin++)
         {
             input[apin] <<= 1;
@@ -331,6 +359,7 @@ int main(void)
         {
             int time = get_ms_from_start();
             t = 0;
+            serial_printf(false, "\033[2J\033[1;1H"); // clear terminal screen
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
                 for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
@@ -338,15 +367,15 @@ int main(void)
                     serial_printf(false, "%d %d: ", apin, dpin);//-(12*2+16-31)));
                     for (int16_t i=0;i<NR_SAMPLES;i++)
                     {
-                        int32_t tmp = xcors[apin][i][dpin];
-                        serial_printf(false, "%5d", (tmp*tmp)/SIGMA2/XCOR_DECAY_SAMPLES);
+                        float tmp = XCOR(i, dpin, apin);
+                        serial_printf(false, "%5d", int((tmp*tmp)/XCOR_DECAY_SAMPLES/SIGMA2));
                     }
                     serial_printf(false, "\r\n");
                 }
             }
-            serial_printf_flush();
             serial_printf(false, "%d %d\r\n", time - start_time, get_ms_from_start() - time);
             start_time = get_ms_from_start();
+            serial_printf_flush();
         }
     }
 }
