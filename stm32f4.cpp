@@ -12,7 +12,7 @@
 #include <stdio.h>
 
 #define NR_OUTPUTS 1 // can't be more than 8
-#define NR_INPUTS 1
+#define NR_INPUTS 2
 #define MAX_DISTANCE 1.5//5.0 // m
 #define TIME_LAG 0.0000 // s, time to shift xcor analysis by to compensate for speaker lag
 #define XCOR_DECAY_TIME 1.000 // s
@@ -20,8 +20,8 @@
 //#define MAX_SAMPLE_RATE 40500 // Hz //2in, 2out at 1.5m
 //#define MAX_SAMPLE_RATE 57500 // Hz //1in, 2out at 1.5m
 //#define MAX_SAMPLE_RATE 47500 // Hz //3in, 1out at 1.5m
-//#define MAX_SAMPLE_RATE 58000 // Hz //2in, 1out at 1.5m
-#define MAX_SAMPLE_RATE 79000 // Hz //1in, 1out at 1.5m
+#define MAX_SAMPLE_RATE 58000 // Hz //2in, 1out at 1.5m
+//#define MAX_SAMPLE_RATE 80000 // Hz //1in, 1out at 1.5m
 #define SPEED_OF_SOUND (340.3/2.0) // m/s, divide by 2 because sound travels out and back
 #define SAMPLE_RATE (MAX_SAMPLE_RATE)
 #define DISTANCE_PER_SAMPLE (SPEED_OF_SOUND/SAMPLE_RATE)
@@ -238,44 +238,12 @@ uint32_t real_rand()
     return RNG_DR;
 }
 
-inline void insert_bit(uint32_t* buf, bool bit, int16_t loc)
+inline void insert_bit(uint32_t* buf, uint32_t bit, int16_t loc)
 {
     int i = loc / 32;
     int offset = loc % 32;
-    buf[i] = (buf[i]&(~(1<<offset))) | (bit << offset);
+    buf[i] = (buf[i]&(~(uint32_t(1)<<offset))) | (bit << offset);
 }  
-
-inline void circ_copy_bits(uint32_t* dst, uint32_t* src, uint16_t loc, uint16_t num_int32s)
-{
-    int i = loc / 32;
-    int offset = loc % 32;
-    uint32_t first_bits=src[i], second_bits, ind=0;
-    uint16_t num_copied = 0;
-    i++;
-    for (; i<num_int32s; i++, num_copied++)
-    {
-        second_bits=src[i];
-        dst[num_copied] = (second_bits<<(32-offset)) | (first_bits>>offset);
-        first_bits = second_bits;
-    }
-    i = 0;
-    for (; num_copied<num_int32s; i++, num_copied++)
-    {
-        second_bits=src[i];
-        dst[num_copied] = (second_bits<<(32-offset)) | (first_bits>>offset);
-        first_bits = second_bits;
-    }
-}
-
-inline uint32_t get_32bits(uint32_t* buf, int16_t loc, uint16_t num_bits)
-{
-    if (loc > num_bits) loc -= num_bits;
-    if (loc < 0) loc += num_bits;
-    int i = loc / 32;
-    int offset = loc % 32;
-    
-    return (buf[i+1]<<(32-offset)) | (buf[i]>>offset);
-}
 
 int main(void)
 {
@@ -283,18 +251,19 @@ int main(void)
 // sigma = norm_inverse_cdf(p/2), divide by 2 because we are using a single-tailed test.
 // significant if xcors**2 > sum((input-mean_input)**2)*sigma**2
 
-    uint32_t rand_hist[NR_OUTPUTS][HISTORY_LEN] = {0}; // need one extra slot due to the analog value being delayed by 1 cycle
     int32_t xcors[NR_SAMPLES][NR_INPUTS][NR_OUTPUTS] = {0};
     #define XCOR(i, dpin, apin) xcors[i][apin][dpin]
+    uint32_t rand_hist[NR_OUTPUTS][HISTORY_LEN] = {0}; // need one extra slot due to the analog value being delayed by 1 cycle
     uint32_t input[NR_INPUTS] = {0};
     int32_t t = 0;
     uint32_t start_time = 0;
     uint32_t rnd = 0;
-    uint8_t calc_phase = ((-SAMPLE_LAG) & 31);
+    uint8_t calc_phase = ((-SAMPLE_LAG) & 31); // & with 31 to ensure it is always between 0 and 31, even when negative; % keeps sign.
     int16_t bit_pos = 0;
     int hist_i, xcor_i;
     int decay_i = 0;
-
+    int r;
+    
     setup();
     
     while (true)
@@ -304,18 +273,17 @@ int main(void)
 
         for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
         {
-            int r = (rnd&(1<<dpin))>>dpin;
+            r = (rnd&(1<<dpin))>>dpin;
             insert_bit(rand_hist[dpin], r, bit_pos);
             if (r) gpio_set(GPIOB, 1<<dpin);
             else gpio_clear(GPIOB, 1<<dpin);
         }
 
-        hist_i = (bit_pos+31)/32; // the 32bits we want start 31 bits back (positive values are back in time)
+        hist_i = (bit_pos+31+1)/32; // the 32bits we want start 31 bits back (positive values are back in time) and 1 more bit because input is delayed by 1 cycle
         xcor_i = calc_phase;
         do
         {
             if (hist_i>=HISTORY_LEN) hist_i-=HISTORY_LEN;
-            if (hist_i<0) hist_i+=HISTORY_LEN;
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
                 uint32_t input_apin = input[apin];
@@ -341,7 +309,7 @@ int main(void)
         {
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
-                XCOR(decay_i, dpin, apin) *= 1.0 - 1.0/(XCOR_DECAY_SAMPLES/float(NR_SAMPLES));
+                XCOR(decay_i, dpin, apin) *= 1.0 - 1.0/(XCOR_DECAY_SAMPLES/float(NR_SAMPLES)); // we only decay once every NR_SAMPLES iterations
             }
         }
         decay_i++;
@@ -351,7 +319,7 @@ int main(void)
         for (uint8_t apin=0; apin<NR_INPUTS; apin++)
         {
             input[apin] <<= 1;
-            input[apin] |= gpio_get(GPIOA, 1<<apin);
+            input[apin] |= gpio_get(GPIOA, 1<<apin)>>apin;
         }
 
         t += 1;
@@ -359,6 +327,7 @@ int main(void)
         {
             int time = get_ms_from_start();
             t = 0;
+
             serial_printf(false, "\033[2J\033[1;1H"); // clear terminal screen
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
