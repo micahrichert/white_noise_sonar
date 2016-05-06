@@ -11,17 +11,20 @@
 #include <libopencm3/stm32/f4/rng.h>
 #include <stdio.h>
 
-#define NR_OUTPUTS 1 // can't be more than 8
-#define NR_INPUTS 2
+#define NR_OUTPUTS 2
+#define NR_INPUTS 3
 #define MAX_DISTANCE 1.5//5.0 // m
 #define TIME_LAG 0.0000 // s, time to shift xcor analysis by to compensate for speaker lag
 #define XCOR_DECAY_TIME 1.000 // s
 #define SIGMA 1.0 // how many standard deviations greater than chance should be considered significant
-//#define MAX_SAMPLE_RATE 40500 // Hz //2in, 2out at 1.5m
-//#define MAX_SAMPLE_RATE 57500 // Hz //1in, 2out at 1.5m
-//#define MAX_SAMPLE_RATE 47500 // Hz //3in, 1out at 1.5m
-#define MAX_SAMPLE_RATE 58000 // Hz //2in, 1out at 1.5m
-//#define MAX_SAMPLE_RATE 80000 // Hz //1in, 1out at 1.5m
+#define MAX_SAMPLE_RATE 75000 // Hz //3in, 2out at 1.5m
+//#define MAX_SAMPLE_RATE 88000 // Hz //2in, 2out at 1.5m
+//#define MAX_SAMPLE_RATE 111500 // Hz //1in, 2out at 1.5m
+//#define MAX_SAMPLE_RATE 89500 // Hz //4in, 1out at 1.5m
+//#define MAX_SAMPLE_RATE 96500 // Hz //3in, 1out at 1.5m
+//#define MAX_SAMPLE_RATE 121000 // Hz //2in, 1out at 1.5m
+//#define MAX_SAMPLE_RATE 152000 // Hz //1in, 1out at 1.5m
+
 #define SPEED_OF_SOUND (340.3/2.0) // m/s, divide by 2 because sound travels out and back
 #define SAMPLE_RATE (MAX_SAMPLE_RATE)
 #define DISTANCE_PER_SAMPLE (SPEED_OF_SOUND/SAMPLE_RATE)
@@ -32,7 +35,7 @@
 #define SAMPLE_LAG (int(TIME_LAG*SAMPLE_RATE)+1) // add 1 because inputs are always sampled time step behind
 #define HISTORY_LEN (NR_SAMPLES/32+1)
 
-#define SERIAL_MESSAGE_BUFFER_SIZE (1024*10)
+#define SERIAL_MESSAGE_BUFFER_SIZE (1024*5)
 
 static char            tx_buffer[2][SERIAL_MESSAGE_BUFFER_SIZE];
 static uint32_t        num_chars_to_send = 0;
@@ -238,12 +241,31 @@ uint32_t real_rand()
     return RNG_DR;
 }
 
-inline void insert_bit(uint32_t* buf, uint32_t bit, int16_t loc)
+#define HIST_TYPE uint32_t
+#define HIST_TYPE_BITS (sizeof(HIST_TYPE)*8)
+
+inline void insert_bit(HIST_TYPE* buf, HIST_TYPE bit, int16_t loc)
 {
-    int i = loc / 32;
-    int offset = loc % 32;
-    buf[i] = (buf[i]&(~(uint32_t(1)<<offset))) | (bit << offset);
+    int i = loc / HIST_TYPE_BITS;
+    int offset = loc % HIST_TYPE_BITS;
+    buf[i] = (buf[i]&(~(HIST_TYPE(1)<<offset))) | (bit << offset);
 }  
+
+inline unsigned int bitcount32(uint32_t i)
+{
+  //Parallel binary bit add
+  i = i - ((i >> 1) & 0x55555555);
+  i = (i & 0x33333333) + ((i >> 2) & 0x33333333);
+  return (((i + (i >> 4)) & 0xF0F0F0F) * 0x1010101) >> 24;
+}
+
+uint8_t wordbits[65536]; // use 64K of memory but fastest implementation
+inline int popcount32_tbl(uint32_t i)
+{
+    return (wordbits[i&0xFFFF] + wordbits[i>>16]);
+}
+
+#define POPCNT(i) popcount32_tbl(i) // bitcount32(i) //__builtin_popcount(i)
 
 int main(void)
 {
@@ -253,16 +275,18 @@ int main(void)
 
     int32_t xcors[NR_SAMPLES][NR_INPUTS][NR_OUTPUTS] = {0};
     #define XCOR(i, dpin, apin) xcors[i][apin][dpin]
-    uint32_t rand_hist[NR_OUTPUTS][HISTORY_LEN] = {0}; // need one extra slot due to the analog value being delayed by 1 cycle
-    uint32_t input[NR_INPUTS] = {0};
+    HIST_TYPE rand_hist[NR_OUTPUTS][HISTORY_LEN] = {0}; // need one extra slot due to the analog value being delayed by 1 cycle
+    HIST_TYPE input[NR_INPUTS] = {0};
     int32_t t = 0;
     uint32_t start_time = 0;
     uint32_t rnd = 0;
-    uint8_t calc_phase = ((-SAMPLE_LAG) & 31); // & with 31 to ensure it is always between 0 and 31, even when negative; % keeps sign.
+    uint8_t calc_phase = ((-SAMPLE_LAG) & (HIST_TYPE_BITS-1)); // & with 31 to ensure it is always between 0 and 31, even when negative; % keeps sign.
     int16_t bit_pos = 0;
     int hist_i, xcor_i;
     int decay_i = 0;
     int r;
+    
+    for (uint32_t i=0; i<65536; i++) wordbits[i] = __builtin_popcount(i);
     
     setup();
     
@@ -279,30 +303,30 @@ int main(void)
             else gpio_clear(GPIOB, 1<<dpin);
         }
 
-        hist_i = (bit_pos+31+1)/32; // the 32bits we want start 31 bits back (positive values are back in time) and 1 more bit because input is delayed by 1 cycle
+        hist_i = (bit_pos+(HIST_TYPE_BITS-1)+1)/HIST_TYPE_BITS; // the 32bits we want start 31 bits back (positive values are back in time) and 1 more bit because input is delayed by 1 cycle
         xcor_i = calc_phase;
         do
         {
             if (hist_i>=HISTORY_LEN) hist_i-=HISTORY_LEN;
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
-                uint32_t input_apin = input[apin];
+                HIST_TYPE input_apin = input[apin];
                 for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
                 {
-                    uint32_t shift_hist = rand_hist[dpin][hist_i];
+                    HIST_TYPE shift_hist = rand_hist[dpin][hist_i];
                     
                     //compute actual xcross-correlation
-                    XCOR(xcor_i, dpin, apin) -= __builtin_popcount(shift_hist ^ input_apin) - 16; // count the number of 1s in the 32 bits and subtract the mean
+                    XCOR(xcor_i, dpin, apin) -= POPCNT(shift_hist ^ input_apin) - HIST_TYPE_BITS/2; // count the number of 1s in the 32 bits and subtract the mean
                 }
             }
             
-            xcor_i += 32;
+            xcor_i += HIST_TYPE_BITS;
             hist_i++;
         } while (xcor_i<NR_SAMPLES);
         calc_phase++;
-        calc_phase %= 32;
+        calc_phase %= HIST_TYPE_BITS;
         bit_pos--;
-        if (bit_pos<0) bit_pos += HISTORY_LEN*32;
+        if (bit_pos<0) bit_pos += HISTORY_LEN*HIST_TYPE_BITS;
 
         // decay and detect significant values        
         for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
@@ -327,21 +351,22 @@ int main(void)
         {
             int time = get_ms_from_start();
             t = 0;
-
             serial_printf(false, "\033[2J\033[1;1H"); // clear terminal screen
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
                 for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
                 {
                     serial_printf(false, "%d %d: ", apin, dpin);//-(12*2+16-31)));
-                    for (int16_t i=0;i<NR_SAMPLES;i++)
+                    for (int16_t i=0;i<10;i++)
                     {
                         float tmp = XCOR(i, dpin, apin);
-                        serial_printf(false, "%5d", int((tmp*tmp)/XCOR_DECAY_SAMPLES/SIGMA2));
+                        int val = int((tmp*tmp)/XCOR_DECAY_SAMPLES/SIGMA2);
+                        if (val > 1) serial_printf(false, "%d:%d ", i, val);
                     }
                     serial_printf(false, "\r\n");
                 }
             }
+            serial_printf_flush();
             serial_printf(false, "%d %d\r\n", time - start_time, get_ms_from_start() - time);
             start_time = get_ms_from_start();
             serial_printf_flush();
