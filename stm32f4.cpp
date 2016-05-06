@@ -16,8 +16,8 @@
 #define NR_INPUTS 1
 #define MAX_DISTANCE 0.5//5.0 // m
 #define SAMPLE_STEP_SIZE 1 // integer
-#define TIME_LAG 0.000 // s, time to shift xcor analysis by to compensate for speaker lag
-#define XCOR_DECAY_TIME 1.000 // s
+#define TIME_LAG 0.00//10//25//125 // s, time to shift xcor analysis by to compensate for speaker lag
+#define XCOR_DECAY_TIME 1.00 // s
 #define INPUT_BITS 12
 #define INPUT_MEAN 1700//((1<<INPUT_BITS)/2) // input bit precision /2
 #define SIGMA 3.0 // how many standard deviations greater than chance should be considered significant
@@ -289,6 +289,7 @@ int main(void)
     int16_t rand_hist[NR_SAMPLES*SAMPLE_STEP_SIZE+SAMPLE_LAG][NR_OUTPUTS] = {0}; // need one extra slot due to the analog value being delayed by 1 cycle
     int16_t rand_hist_pos;
     int32_t xcors[NR_INPUTS][NR_SAMPLES][NR_OUTPUTS] = {0};
+    int32_t xcors_prev[NR_INPUTS][NR_SAMPLES][NR_OUTPUTS] = {0};
     int16_t prev_input[NR_INPUTS];
     float cum_input2[NR_INPUTS];
     int32_t t = 0;
@@ -322,7 +323,9 @@ int main(void)
 
         for (int i=NR_SAMPLES-1, pos=rand_hist_pos-SAMPLE_LAG; i>=0; i--)
         {
-            pos += (pos-SAMPLE_STEP_SIZE < 0) ? (NR_SAMPLES*SAMPLE_STEP_SIZE+SAMPLE_LAG): (-SAMPLE_STEP_SIZE);
+            pos -= SAMPLE_STEP_SIZE;
+            if (pos < 0) pos += NR_SAMPLES*SAMPLE_STEP_SIZE+SAMPLE_LAG;
+//            pos += (pos-SAMPLE_STEP_SIZE < 0) ? (NR_SAMPLES*SAMPLE_STEP_SIZE+SAMPLE_LAG): (-SAMPLE_STEP_SIZE);
             //compute actual xcross-correlation
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
@@ -370,12 +373,13 @@ int main(void)
                     serial_printf(false, "%d %d: ", apin, dpin);//-(12*2+16-31)));
                     for (int16_t i=NR_SAMPLES-1;i>=0;i--)
                     {
-                        float tmp = xcors[apin][i][dpin]/float(1<<((16+12-31/2)));//>>(16+12-31/2);
+                        float tmp = (xcors[apin][i][dpin]-xcors_prev[apin][i][dpin])/float(1<<((16+12-31/2)));//>>(16+12-31/2);
                         serial_printf(false, "%5d", int((tmp*tmp)/var/SIGMA2));
                     }
                     serial_printf(false, "\r\n");
                 }
             }
+            memcpy(xcors_prev, xcors, sizeof(xcors));
             serial_printf(false, "%d %d %s\r\n", time - start_time, get_ms_from_start() - time, adc_too_slow?"adc too slow":"");
             serial_printf_flush();
             start_time = get_ms_from_start();
