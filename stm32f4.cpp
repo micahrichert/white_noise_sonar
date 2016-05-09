@@ -290,7 +290,8 @@ int main(void)
     int16_t rand_hist_pos;
     int32_t xcors[NR_INPUTS][NR_SAMPLES][NR_OUTPUTS] = {0};
     int32_t xcors_prev[NR_INPUTS][NR_SAMPLES][NR_OUTPUTS] = {0};
-    int16_t prev_input[NR_INPUTS];
+    int16_t input[NR_INPUTS] = {0};
+    int16_t prev_input[NR_INPUTS] = {0};
     float cum_input2[NR_INPUTS];
     int32_t t = 0;
     uint32_t start_time = 0;
@@ -331,7 +332,7 @@ int main(void)
             {
                 for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
                 {
-                    xcors[apin][i][dpin] += rand_hist[pos][dpin] * prev_input[apin];
+                    xcors[apin][i][dpin] += rand_hist[pos][dpin] * input[apin];
                 }
             }
         }
@@ -356,8 +357,11 @@ int main(void)
     	    uint32_t adc = pin_to_ADC(apin);
             if (!adc_eoc(adc)) adc_too_slow = true;
             
-            prev_input[apin] = adc_read_regular(adc) - INPUT_MEAN;
-            cum_input2[apin] = cum_input2[apin]*(1.0-1.0/XCOR_DECAY_SAMPLES) + ((prev_input[apin]*prev_input[apin]));//>>(12*2+16-31));
+            int tmp_in = adc_read_regular(adc);
+            
+            input[apin] = (tmp_in > prev_input[apin])*2-1; //tmp_in - prev_input[apin];// - INPUT_MEAN;
+            prev_input[apin] = tmp_in;
+            cum_input2[apin] = cum_input2[apin]*(1.0-1.0/XCOR_DECAY_SAMPLES) + ((input[apin]*input[apin]));//>>(12*2+16-31));
         }
         t += 1;
         if (t >= XCOR_DECAY_SAMPLES)
@@ -379,7 +383,7 @@ int main(void)
                     serial_printf(false, "\r\n");
                 }
             }
-            memcpy(xcors_prev, xcors, sizeof(xcors));
+//            memcpy(xcors_prev, xcors, sizeof(xcors));
             serial_printf(false, "%d %d %s\r\n", time - start_time, get_ms_from_start() - time, adc_too_slow?"adc too slow":"");
             serial_printf_flush();
             start_time = get_ms_from_start();
