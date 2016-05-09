@@ -14,7 +14,7 @@
 
 #define NR_OUTPUTS 1 // can't be more than 8
 #define NR_INPUTS 1
-#define MAX_DISTANCE 0.5//5.0 // m
+#define MAX_DISTANCE 1.5//5.0 // m
 #define SAMPLE_STEP_SIZE 1 // integer
 #define TIME_LAG 0.00//10//25//125 // s, time to shift xcor analysis by to compensate for speaker lag
 #define XCOR_DECAY_TIME 1.00 // s
@@ -25,7 +25,7 @@
 //#define MAX_SAMPLE_RATE 43206 // Hz //1in, 2out at 0.5m
 //#define MAX_SAMPLE_RATE 47175 // Hz //3in, 1out at 0.5m
 //#define MAX_SAMPLE_RATE 50666 // Hz //2in, 1out at 0.5m
-#define MAX_SAMPLE_RATE 57000 // Hz //1in, 1out at 0.5m
+#define MAX_SAMPLE_RATE 36600 // Hz //1in, 1out at 1.5m
 #define SPEED_OF_SOUND (340.3/2.0) // m/s, divide by 2 because sound travels out and back
 #define SAMPLE_RATE (MAX_SAMPLE_RATE)
 #define DISTANCE_PER_SAMPLE (SPEED_OF_SOUND/SAMPLE_RATE)
