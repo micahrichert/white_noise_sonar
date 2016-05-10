@@ -11,15 +11,16 @@
 #include <libopencm3/stm32/adc.h>
 #include <stdio.h>
 
-const int NOISE_LEVEL = 0; // add hysteresis to input when using analog/ADC
+const int NOISE_LEVEL = 2; // add hysteresis to input when using analog/ADC
 const int USE_ANALOG_INPUT = 1;
 const int NR_OUTPUTS = 2;
 const int NR_INPUTS = 3;
 const float MAX_DISTANCE = 1.5;//5.0 // m
 const float TIME_LAG = 0.0000; // s, time to shift xcor analysis by to compensate for speaker lag
 const float XCOR_DECAY_TIME = 1.000; // s
-const float SIGMA = 1.0; // how many standard deviations greater than chance should be considered significant
+const float SIGMA = 3.0; // how many standard deviations greater than chance should be considered significant
 const float MAX_SAMPLE_RATE = 75000; // Hz //3in, 2out at 1.5m
+//const float MAX_SAMPLE_RATE = 75000; // Hz //3in, 2out at 1.5m
 //const float MAX_SAMPLE_RATE = 88000; // Hz //2in, 2out at 1.5m
 //const float MAX_SAMPLE_RATE = 111500; // Hz //1in, 2out at 1.5m
 //const float MAX_SAMPLE_RATE = 89500; // Hz //4in, 1out at 1.5m
@@ -163,7 +164,7 @@ void serial_printf_helper(bool block, const char* pFormat, ...)
             // copy data to available tx_buffer
             num_chars_to_send += num_written;
 
-            if (SERIAL_MESSAGE_BUFFER_SIZE - num_chars_to_send < 100) serial_printf_flush();
+            if (SERIAL_MESSAGE_BUFFER_SIZE - num_chars_to_send < SERIAL_MESSAGE_BUFFER_SIZE/2) serial_printf_flush();
         }
     }
 }
@@ -364,7 +365,7 @@ int main(void)
                     HIST_TYPE shift_hist = rand_hist[dpin][hist_i];
                     
                     //compute actual xcross-correlation
-                    XCOR(xcor_i, dpin, apin) -= POPCNT(shift_hist ^ input_apin) - HIST_TYPE_BITS/2; // count the number of 1s in the 32 bits and subtract the mean
+                    XCOR(xcor_i, dpin, apin) -= POPCNT(shift_hist ^ input_apin)*2 - HIST_TYPE_BITS; // count the number of 1s in the 32 bits *2 (for unit variance) and subtract the mean
                 }
             }
             
@@ -397,12 +398,11 @@ int main(void)
                 while (!adc_eoc(adc)) ;//adc_too_slow = true;
                 
                 tmp_in = adc_read_regular(adc);
-//                if ((tmp_in - previous_input[apin] < NOISE_LEVEL) & (tmp_in - previous_input[apin] > -NOISE_LEVEL))
-//                    input[apin] |= (input[apin]&0x2)>>1;
-//                else
-                    input[apin] |= tmp_in > 1600;//previous_input[apin];//((1<<12)/2);//previous_input[apin];
+                if ((tmp_in - previous_input[apin] < NOISE_LEVEL) & (tmp_in - previous_input[apin] > -NOISE_LEVEL))
+                    input[apin] |= (input[apin]&0x2)>>1;
+                else
+                    input[apin] |= tmp_in > previous_input[apin];//((1<<12)/2);//previous_input[apin];
                 previous_input[apin] = tmp_in;
-//if (apin == 1) serial_printf(false, "%d\r\n", tmp_in);                
             } else {
                 input[apin] |= gpio_get(GPIOA, 1<<apin)>>apin;
             }
@@ -411,7 +411,6 @@ int main(void)
         t += 1;
         if (t >= XCOR_DECAY_SAMPLES)
         {
-//while(1);
             int time = get_ms_from_start();
             t = 0;
             serial_printf(false, "\033[2J\033[1;1H"); // clear terminal screen
@@ -420,11 +419,11 @@ int main(void)
                 for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
                 {
                     serial_printf(false, "%d %d: ", apin, dpin);//-(12*2+16-31)));
-                    for (int16_t i=0;i<10;i++)
+                    for (int16_t i=0;i<NR_SAMPLES;i++)
                     {
                         float tmp = XCOR(i, dpin, apin);
                         int val = int((tmp*tmp)/XCOR_DECAY_SAMPLES/SIGMA2);
-                        if (val > 1) serial_printf(false, "%d:%d ", i, val);
+                        if (val >= 1) serial_printf(false, "%d:%d ", i, val);
                     }
                     serial_printf(false, "\r\n");
                 }
