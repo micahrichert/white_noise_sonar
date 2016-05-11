@@ -1,219 +1,67 @@
 #include <stdint.h>
-#include <string.h>
-#include <stdarg.h>
-#include <libopencm3/cm3/systick.h>
-#include <libopencm3/cm3/nvic.h>
-#include <libopencm3/stm32/dma.h>
-#include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/rcc.h>
-#include <libopencm3/stm32/usart.h>
+#include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/f4/rng.h>
 #include <libopencm3/stm32/adc.h>
-#include <stdio.h>
 
-const int NOISE_LEVEL = 2; // add hysteresis to input when using analog/ADC
+#include "serial_printf.cpp"
+#include "clock.cpp"
+
+/*
+Chi2 significance threshold table generated with the following python code:
+
+import scipy.stats
+import numpy as np
+cum_p_thresh = scipy.stats.norm.cdf(3.0)  # 3.0 sigmas (1 in 370 false positive) works pretty well
+thresh = scipy.stats.chi2.ppf(cum_p_thresh, np.arange(1, 100))
+np.set_printoptions(precision=2)
+print repr(thresh)
+
+*/
+const float chi2_threshs[100] = {  10.27,   13.22,   15.63,   17.8 ,   19.82,   21.74,   23.58,
+         25.36,   27.09,   28.78,   30.44,   32.07,   33.67,   35.25,
+         36.81,   38.35,   39.87,   41.38,   42.87,   44.35,   45.82,
+         47.28,   48.73,   50.16,   51.59,   53.01,   54.42,   55.83,
+         57.23,   58.62,   60.  ,   61.38,   62.75,   64.12,   65.48,
+         66.83,   68.18,   69.53,   70.87,   72.21,   73.54,   74.87,
+         76.2 ,   77.52,   78.84,   80.15,   81.46,   82.77,   84.07,
+         85.37,   86.67,   87.97,   89.26,   90.55,   91.84,   93.12,
+         94.4 ,   95.68,   96.96,   98.24,   99.51,  100.78,  102.05,
+        103.31,  104.58,  105.84,  107.1 ,  108.36,  109.61,  110.87,
+        112.12,  113.37,  114.62,  115.87,  117.11,  118.36,  119.6 ,
+        120.84,  122.08,  123.32,  124.55,  125.79,  127.02,  128.25,
+        129.48,  130.71,  131.94,  133.17,  134.39,  135.62,  136.84,
+        138.06,  139.28,  140.5 ,  141.72,  142.94,  144.15,  145.37,
+        146.58};
+
+const int NOISE_LEVEL = 0; // add hysteresis to input when using analog/ADC
 const int USE_ANALOG_INPUT = 1;
 const int NR_OUTPUTS = 2;
 const int NR_INPUTS = 3;
-const float MAX_DISTANCE = 1.5;//5.0 // m
+const float MAX_DISTANCE = 1.5; // m
 const float TIME_LAG = 0.0000; // s, time to shift xcor analysis by to compensate for speaker lag
 const float XCOR_DECAY_TIME = 1.000; // s
-const float SIGMA = 3.0; // how many standard deviations greater than chance should be considered significant
-const float MAX_SAMPLE_RATE = 75000; // Hz //3in, 2out at 1.5m
-//const float MAX_SAMPLE_RATE = 75000; // Hz //3in, 2out at 1.5m
-//const float MAX_SAMPLE_RATE = 88000; // Hz //2in, 2out at 1.5m
-//const float MAX_SAMPLE_RATE = 111500; // Hz //1in, 2out at 1.5m
-//const float MAX_SAMPLE_RATE = 89500; // Hz //4in, 1out at 1.5m
-//const float MAX_SAMPLE_RATE = 96500; // Hz //3in, 1out at 1.5m
-//const float MAX_SAMPLE_RATE = 121000; // Hz //2in, 1out at 1.5m
-//const float MAX_SAMPLE_RATE = 152000; // Hz //1in, 1out at 1.5m
-
+const float DESIRED_OUTPUT_BIN_DISTANCE = 0.025; // m, set desired value but ACTUAL_OUTPUT_BIN_DISTANCE is what is used
+const float SAMPLE_RATE = 75000; // Hz //3in, 2out at 1.5m
+//const float SAMPLE_RATE = 75000; // Hz //3in, 2out at 1.5m
+//const float SAMPLE_RATE = 88000; // Hz //2in, 2out at 1.5m
+//const float SAMPLE_RATE = 111500; // Hz //1in, 2out at 1.5m
+//const float SAMPLE_RATE = 89500; // Hz //4in, 1out at 1.5m
+//const float SAMPLE_RATE = 96500; // Hz //3in, 1out at 1.5m
+//const float SAMPLE_RATE = 121000; // Hz //2in, 1out at 1.5m
+//const float SAMPLE_RATE = 152000; // Hz //1in, 1out at 1.5m
 const float SPEED_OF_SOUND = 340.3/2.0; // m/s, divide by 2 because sound travels out and back
-const float SAMPLE_RATE = MAX_SAMPLE_RATE;
+
+// dependant variables
 const float DISTANCE_PER_SAMPLE = SPEED_OF_SOUND/SAMPLE_RATE;
-const int NR_SAMPLES = MAX_DISTANCE/DISTANCE_PER_SAMPLE;
+const int MERGE_BIN_CNT = DESIRED_OUTPUT_BIN_DISTANCE/DISTANCE_PER_SAMPLE;
+const float ACTUAL_OUTPUT_BIN_DISTANCE = MERGE_BIN_CNT*DISTANCE_PER_SAMPLE; // m, see DESIRED_OUTPUT_BIN_DISTANCE
+const int NR_SAMPLES = int(MAX_DISTANCE/DISTANCE_PER_SAMPLE)/MERGE_BIN_CNT*MERGE_BIN_CNT; // make sure NR_SAMPLES is a multple of merge
 const int XCOR_DECAY_SAMPLES = SAMPLE_RATE * XCOR_DECAY_TIME;
 const float XCOR_DECAY_RATE = 1.0 - 1.0/XCOR_DECAY_SAMPLES;
-const float SIGMA2 = SIGMA*SIGMA; // the code works with variance instead of standard deviation
 const int SAMPLE_LAG = TIME_LAG*SAMPLE_RATE + 1; // add 1 because inputs are always sampled time step behind
 const int HISTORY_LEN = NR_SAMPLES/32 + 1;
 
-
-// serial printf
-const int SERIAL_MESSAGE_BUFFER_SIZE = 1024*5;
-static char            tx_buffer[2][SERIAL_MESSAGE_BUFFER_SIZE];
-static uint32_t        num_chars_to_send = 0;
-static uint32_t        available_buffer  = 0;
-static volatile bool   transfer_complete = true;
-
-void dma1_stream3_isr()
-{
-    // check if transfer is complete
-    if (dma_get_interrupt_flag(DMA1, DMA_STREAM3, DMA_LISR_TCIF0))
-    {
-        // turn off transfer
-        usart_disable_tx_dma(USART3);
-        dma_disable_stream(DMA1, DMA_STREAM3);
-
-        // clear interrupt flag, so interrupt won't fire again
-        dma_clear_interrupt_flags(DMA1, DMA_STREAM3, DMA_LISR_TCIF0);
-        transfer_complete = true;
-    }
-}
-
-// Initialize COM1 port as serial output device
-void serial_init(uint32_t baud)
-{
-    rcc_periph_clock_enable(RCC_GPIOD);
-    rcc_periph_clock_enable(RCC_USART3);
-    rcc_periph_clock_enable(RCC_DMA1);
-
-    // Setup GPIO pins for USART3 transmit.
-    gpio_mode_setup(GPIOD, GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO8);
-    // Setup USART3 TX pin as alternate function.
-    gpio_set_af(GPIOD, GPIO_AF7, GPIO8);
-
-    // configure USART3
-    usart_set_baudrate(USART3, baud);
-    usart_set_databits(USART3, 8);
-    usart_set_stopbits(USART3, USART_STOPBITS_1);
-    usart_set_mode(USART3, USART_MODE_TX);
-    usart_set_parity(USART3, USART_PARITY_NONE);
-    usart_set_flow_control(USART3, USART_FLOWCONTROL_NONE);
-    usart_enable(USART3);
-
-    // configure DMA
-    dma_stream_reset(DMA1, DMA_STREAM3);
-    dma_set_transfer_mode(DMA1,
-                          DMA_STREAM3,
-                          DMA_SxCR_DIR_MEM_TO_PERIPHERAL);
-    dma_set_peripheral_address(DMA1, DMA_STREAM3, (uint32_t)&USART3_DR);
-    // use channel, connected to USART3
-    dma_channel_select(DMA1,
-                       DMA_STREAM3,
-                       DMA_SxCR_CHSEL_4);
-    // increment a memory pointer after each transfer
-    dma_enable_memory_increment_mode(DMA1,
-                                     DMA_STREAM3);
-    // do not increment peripheral pointer, all ADC regular channel data is stored in single register
-    dma_disable_peripheral_increment_mode(DMA1,
-                                          DMA_STREAM3);
-    dma_set_memory_size(DMA1, DMA_STREAM3, DMA_SxCR_MSIZE_8BIT);
-    dma_set_peripheral_size(DMA1, DMA_STREAM3, DMA_SxCR_PSIZE_8BIT);
-    dma_set_priority(DMA1,
-                     DMA_STREAM3,
-                     DMA_SxCR_PL_HIGH);
-    // fire dma1_stream3_isr when transfer is complete
-    dma_enable_transfer_complete_interrupt(DMA1, DMA_STREAM3);
-
-    // setup some priority for DMA interrupt, not very important interrupt
-    nvic_set_priority(NVIC_DMA1_STREAM3_IRQ, 5);
-    nvic_enable_irq(NVIC_DMA1_STREAM3_IRQ);
-
-    // reset transfer flag, so we won't lock in SERIAL_printf_poll
-    available_buffer  = 0;
-    num_chars_to_send = 0;
-    transfer_complete = true;
-}
-
-
-void serial_printf_flush()
-{
-    // lock until previous transfer is complete
-    if (num_chars_to_send > 0)
-    {
-        while (!transfer_complete);
-
-        // configure dma transfer
-        dma_set_memory_address(DMA1, DMA_STREAM3, (uint32_t)tx_buffer[available_buffer]);
-        dma_set_number_of_data(DMA1, DMA_STREAM3, num_chars_to_send);
-
-        // from now on write to another tx_buffer
-        available_buffer  = 1 - available_buffer;
-        num_chars_to_send = 0;
-
-        // start transfer
-        transfer_complete = false;
-        dma_enable_stream(DMA1, DMA_STREAM3);
-        usart_enable_tx_dma(USART3);
-    }
-}
-
-void serial_printf_helper(bool block, const char* pFormat, ...)
-{
-    va_list ap;
-    uint32_t     num_written;
-
-    if (block) // if blocking
-    {
-        serial_printf_flush();
-        while (!transfer_complete);
-    }
-
-    va_start(ap, pFormat);
-    num_written = vsnprintf(tx_buffer[available_buffer] + num_chars_to_send, SERIAL_MESSAGE_BUFFER_SIZE - num_chars_to_send, pFormat, ap);
-    va_end(ap);
-
-    if (num_written > 0)
-    {
-        if (block) // if blocking
-        {
-            for (size_t i = 0; i<num_written; ++i)
-                usart_send_blocking(USART3, (uint8_t)(tx_buffer[available_buffer] + num_chars_to_send)[i]);
-        } else {
-            // copy data to available tx_buffer
-            num_chars_to_send += num_written;
-
-            if (SERIAL_MESSAGE_BUFFER_SIZE - num_chars_to_send < SERIAL_MESSAGE_BUFFER_SIZE/2) serial_printf_flush();
-        }
-    }
-}
-
-template <typename ... Ts>
-inline void serial_printf(bool block, const char* pFormat, Ts ... ts){
-    serial_printf_helper(block, pFormat, ts...);
-}
-
-// =====================
-//         Clock
-// =====================
-
-constexpr uint32_t ahb_clock      = 168000000;
-constexpr uint32_t systick_clock  = ahb_clock / 8;
-
-// time to reload systick timer in milliseconds & ticks
-static uint16_t systick_period_ms;
-static uint32_t systick_period;
-// variable used as time reference
-static uint32_t time_ms;
-
-void clock_setup()
-{
-    systick_period_ms = 1;
-    systick_period    = systick_clock / 1000 * systick_period_ms;
-
-    // NOTE: if you change clock settings, also change the constants above
-    // 168MHz processor/AHB clock
-    rcc_clock_setup_hse_3v3(&hse_8mhz_3v3[CLOCK_3V3_168MHZ]);
-    // 168MHz / 8 => 21 million counts per second
-    systick_set_clocksource(STK_CSR_CLKSOURCE_AHB_DIV8);
-    // set reload to every 1 milliseconds
-    systick_set_reload(systick_period - 1);
-    systick_interrupt_enable();
-    systick_clear();
-    systick_counter_enable();
-}
-
-// systick interrupt, fired on overload
-extern "C" void sys_tick_handler(void)
-{
-    time_ms += systick_period_ms;
-}
-
-uint32_t get_ms_from_start()
-{
-    return time_ms;
-}
 
 inline uint32_t pin_to_ADC(uint8_t apin)
 {
@@ -309,11 +157,11 @@ int main(void)
 // significant if xcors**2 > sum((input-mean_input)**2)*sigma**2
 
     int32_t xcors[NR_SAMPLES][NR_INPUTS][NR_OUTPUTS] = {0};
-    #define XCOR(i, dpin, apin) xcors[i][apin][dpin]
+    int32_t prev_xcors[NR_SAMPLES][NR_INPUTS][NR_OUTPUTS] = {0};
     HIST_TYPE rand_hist[NR_OUTPUTS][HISTORY_LEN] = {0}; // need one extra slot due to the analog value being delayed by 1 cycle
     HIST_TYPE input[NR_INPUTS] = {0};
     int previous_input[NR_INPUTS] = {0};
-    int32_t t = 0;
+    uint32_t t = 0;
     uint32_t start_time = 0;
     uint32_t rnd = 0;
     uint8_t calc_phase = ((-SAMPLE_LAG) & (HIST_TYPE_BITS-1)); // & with 31 to ensure it is always between 0 and 31, even when negative; % keeps sign.
@@ -323,6 +171,8 @@ int main(void)
     int r;
     bool adc_too_slow = false;
     int tmp_in;
+    int dtime1=0, dtime2=0;
+    bool first_time = true;
     
     for (uint32_t i=0; i<65536; i++) wordbits[i] = __builtin_popcount(i);
     
@@ -341,7 +191,7 @@ int main(void)
 
     while (true)
     {
-        int start=time_ms;
+        int start=get_time_ms();
         rnd = real_rand();
 
         for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
@@ -365,7 +215,7 @@ int main(void)
                     HIST_TYPE shift_hist = rand_hist[dpin][hist_i];
                     
                     //compute actual xcross-correlation
-                    XCOR(xcor_i, dpin, apin) -= POPCNT(shift_hist ^ input_apin)*2 - HIST_TYPE_BITS; // count the number of 1s in the 32 bits *2 (for unit variance) and subtract the mean
+                    xcors[xcor_i][apin][dpin] -= POPCNT(shift_hist ^ input_apin)*2 - HIST_TYPE_BITS; // count the number of 1s in the 32 bits *2 (for unit variance) and subtract the mean
                 }
             }
             
@@ -382,7 +232,7 @@ int main(void)
         {
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
-                XCOR(decay_i, dpin, apin) *= 1.0 - 1.0/(XCOR_DECAY_SAMPLES/float(NR_SAMPLES)); // we only decay once every NR_SAMPLES iterations
+                xcors[decay_i][apin][dpin] *= 1.0 - 1.0/(XCOR_DECAY_SAMPLES/float(NR_SAMPLES)); // we only decay once every NR_SAMPLES iterations
             }
         }
         decay_i++;
@@ -395,13 +245,13 @@ int main(void)
             if (USE_ANALOG_INPUT)
             {
         	    uint32_t adc = pin_to_ADC(apin);
-                while (!adc_eoc(adc)) ;//adc_too_slow = true;
+                while (!adc_eoc(adc)) adc_too_slow = true;
                 
                 tmp_in = adc_read_regular(adc);
                 if ((tmp_in - previous_input[apin] < NOISE_LEVEL) & (tmp_in - previous_input[apin] > -NOISE_LEVEL))
                     input[apin] |= (input[apin]&0x2)>>1;
                 else
-                    input[apin] |= tmp_in > previous_input[apin];//((1<<12)/2);//previous_input[apin];
+                    input[apin] |= tmp_in > previous_input[apin];
                 previous_input[apin] = tmp_in;
             } else {
                 input[apin] |= gpio_get(GPIOA, 1<<apin)>>apin;
@@ -411,27 +261,49 @@ int main(void)
         t += 1;
         if (t >= XCOR_DECAY_SAMPLES)
         {
-            int time = get_ms_from_start();
+            int time = get_time_ms();
             t = 0;
             serial_printf(false, "\033[2J\033[1;1H"); // clear terminal screen
+            serial_printf(false, "cycle time: %d %d %s\r\n", dtime1, dtime2, adc_too_slow?"adc too slow":"");
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
                 for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
                 {
-                    serial_printf(false, "%d %d: ", apin, dpin);//-(12*2+16-31)));
-                    for (int16_t i=0;i<NR_SAMPLES;i++)
+                    serial_printf(false, "%d %d: ", apin, dpin);
+                    for (int i=0;i<NR_SAMPLES;i+=MERGE_BIN_CNT)
                     {
-                        float tmp = XCOR(i, dpin, apin);
-                        int val = int((tmp*tmp)/XCOR_DECAY_SAMPLES/SIGMA2);
-                        if (val >= 1) serial_printf(false, "%d:%d ", i, val);
+                        float sum2 = 0;
+                        for (int j=i; (j<i+MERGE_BIN_CNT)&(j<NR_SAMPLES); j++)
+                        {
+                            float tmp = xcors[j][apin][dpin] - prev_xcors[j][apin][dpin];
+                            sum2 += tmp*tmp;
+                        }
+                        if (sum2 >= chi2_threshs[MERGE_BIN_CNT]*XCOR_DECAY_SAMPLES) serial_printf(false, "%d:%d ", int(i*DISTANCE_PER_SAMPLE*100), int(sum2/XCOR_DECAY_SAMPLES/chi2_threshs[MERGE_BIN_CNT]));
                     }
                     serial_printf(false, "\r\n");
                 }
             }
+            if (first_time)
+            {
+                memcpy(prev_xcors, xcors, sizeof(xcors));
+                first_time = false;
+            } else {
+                for (int i=0;i<NR_SAMPLES;i++)
+                {
+                    for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
+                    {
+                        for (uint8_t apin=0; apin<NR_INPUTS; apin++)
+                        {
+                            prev_xcors[i][apin][dpin] = prev_xcors[i][apin][dpin]*0.9 + 0.1*xcors[i][apin][dpin];
+                        }
+                    }
+                }
+            }
             serial_printf_flush();
-            serial_printf(false, "%d %d %s\r\n", time - start_time, get_ms_from_start() - time, adc_too_slow?"adc too slow":"");
-            start_time = get_ms_from_start();
-            serial_printf_flush();
+            dtime1 = time - start_time;
+            dtime2 = get_time_ms() - time;
+            start_time = get_time_ms();
+//            serial_printf_flush();
         }
     }
 }
