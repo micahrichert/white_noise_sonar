@@ -9,10 +9,10 @@
 
 
 // serial printf
-const int SERIAL_MESSAGE_BUFFER_SIZE = 1024*5;
+const int SERIAL_MESSAGE_BUFFER_SIZE = 1024;
 static char            tx_buffer[2][SERIAL_MESSAGE_BUFFER_SIZE];
-static uint32_t        num_chars_to_send = 0;
-static uint32_t        available_buffer  = 0;
+static volatile uint32_t        num_chars_to_send = 0;
+static volatile uint32_t        available_buffer  = 0;
 static volatile bool   transfer_complete = true;
 
 void dma1_stream3_isr()
@@ -103,15 +103,15 @@ void serial_printf_flush()
 
         // start transfer
         transfer_complete = false;
-        dma_enable_stream(DMA1, DMA_STREAM3);
         usart_enable_tx_dma(USART3);
+        dma_enable_stream(DMA1, DMA_STREAM3);
     }
 }
 
 void serial_printf_helper(bool block, const char* pFormat, ...)
 {
     va_list ap;
-    uint32_t     num_written;
+    uint32_t     num_written, len;
 
     if (block) // if blocking
     {
@@ -120,21 +120,29 @@ void serial_printf_helper(bool block, const char* pFormat, ...)
     }
 
     va_start(ap, pFormat);
+    len = vsnprintf(NULL, 0, pFormat, ap);
+    va_end(ap);
+
+    if (len > SERIAL_MESSAGE_BUFFER_SIZE - num_chars_to_send) serial_printf_flush();
+
+    nvic_disable_irq(NVIC_DMA1_STREAM3_IRQ);
+
+    va_start(ap, pFormat);
     num_written = vsnprintf(tx_buffer[available_buffer] + num_chars_to_send, SERIAL_MESSAGE_BUFFER_SIZE - num_chars_to_send, pFormat, ap);
     va_end(ap);
 
     if (num_written > 0)
     {
-        if (block) // if blocking
-        {
-            for (size_t i = 0; i<num_written; ++i)
-                usart_send_blocking(USART3, (uint8_t)(tx_buffer[available_buffer] + num_chars_to_send)[i]);
-        } else {
-            // copy data to available tx_buffer
-            num_chars_to_send += num_written;
+        // copy data to available tx_buffer
+        num_chars_to_send += num_written;
+    }
+    
+    nvic_enable_irq(NVIC_DMA1_STREAM3_IRQ);
 
-            if (SERIAL_MESSAGE_BUFFER_SIZE - num_chars_to_send < SERIAL_MESSAGE_BUFFER_SIZE/2) serial_printf_flush();
-        }
+    if (block) // if blocking
+    {
+        serial_printf_flush();
+        while (!transfer_complete);
     }
 }
 

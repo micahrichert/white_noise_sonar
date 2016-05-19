@@ -37,8 +37,16 @@ extern "C" void sys_tick_handler(void)
     time_ms += systick_period_ms;
 }
 
-uint32_t get_time_ms()
+uint32_t get_time_us()
 {
-    return time_ms;
+    uint32_t prev_ms;
+    uint32_t systick;
+    do
+    {
+        prev_ms = time_ms;
+        systick = systick_get_value();
+    } while (prev_ms != time_ms);
+    
+    return time_ms*1000 + (systick_period - systick) / (systick_clock / 1000000);
 }
 
