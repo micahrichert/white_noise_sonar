@@ -33,3 +33,4 @@
 
 libopencm3/*
 stlink/*
+*.Po

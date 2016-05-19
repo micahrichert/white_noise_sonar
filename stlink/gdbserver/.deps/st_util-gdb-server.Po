@@ -14,13 +14,13 @@ gdbserver/st_util-gdb-server.o: gdbserver/gdb-server.c \
  /usr/include/x86_64-linux-gnu/bits/siginfo.h \
  /usr/include/x86_64-linux-gnu/bits/sigaction.h \
  /usr/include/x86_64-linux-gnu/bits/sigcontext.h \
- /usr/lib/gcc/x86_64-linux-gnu/4.9/include/stddef.h \
+ /usr/lib/gcc/x86_64-linux-gnu/5/include/stddef.h \
  /usr/include/x86_64-linux-gnu/bits/sigstack.h \
  /usr/include/x86_64-linux-gnu/sys/ucontext.h \
  /usr/include/x86_64-linux-gnu/bits/pthreadtypes.h \
  /usr/include/x86_64-linux-gnu/bits/sigthread.h /usr/include/stdio.h \
  /usr/include/libio.h /usr/include/_G_config.h /usr/include/wchar.h \
- /usr/lib/gcc/x86_64-linux-gnu/4.9/include/stdarg.h \
+ /usr/lib/gcc/x86_64-linux-gnu/5/include/stdarg.h \
  /usr/include/x86_64-linux-gnu/bits/stdio_lim.h \
  /usr/include/x86_64-linux-gnu/bits/sys_errlist.h \
  /usr/include/x86_64-linux-gnu/bits/stdio.h \
@@ -54,13 +54,13 @@ gdbserver/st_util-gdb-server.o: gdbserver/gdb-server.c \
  /usr/include/x86_64-linux-gnu/asm/sockios.h \
  /usr/include/asm-generic/sockios.h \
  /usr/include/x86_64-linux-gnu/bits/socket2.h /usr/include/netinet/in.h \
- /usr/lib/gcc/x86_64-linux-gnu/4.9/include/stdint.h /usr/include/stdint.h \
+ /usr/lib/gcc/x86_64-linux-gnu/5/include/stdint.h /usr/include/stdint.h \
  /usr/include/x86_64-linux-gnu/bits/wchar.h \
  /usr/include/x86_64-linux-gnu/bits/in.h /usr/include/arpa/inet.h \
  src/stlink-common.h src/stlink-sg.h /usr/include/libusb-1.0/libusb.h \
  /usr/include/x86_64-linux-gnu/sys/time.h \
- /usr/lib/gcc/x86_64-linux-gnu/4.9/include-fixed/limits.h \
- /usr/lib/gcc/x86_64-linux-gnu/4.9/include-fixed/syslimits.h \
+ /usr/lib/gcc/x86_64-linux-gnu/5/include-fixed/limits.h \
+ /usr/lib/gcc/x86_64-linux-gnu/5/include-fixed/syslimits.h \
  /usr/include/limits.h /usr/include/x86_64-linux-gnu/bits/posix1_lim.h \
  /usr/include/x86_64-linux-gnu/bits/local_lim.h \
  /usr/include/linux/limits.h \
@@ -112,7 +112,7 @@ gdbserver/st_util-gdb-server.o: gdbserver/gdb-server.c \
 
 /usr/include/x86_64-linux-gnu/bits/sigcontext.h:
 
-/usr/lib/gcc/x86_64-linux-gnu/4.9/include/stddef.h:
+/usr/lib/gcc/x86_64-linux-gnu/5/include/stddef.h:
 
 /usr/include/x86_64-linux-gnu/bits/sigstack.h:
 
@@ -130,7 +130,7 @@ gdbserver/st_util-gdb-server.o: gdbserver/gdb-server.c \
 
 /usr/include/wchar.h:
 
-/usr/lib/gcc/x86_64-linux-gnu/4.9/include/stdarg.h:
+/usr/lib/gcc/x86_64-linux-gnu/5/include/stdarg.h:
 
 /usr/include/x86_64-linux-gnu/bits/stdio_lim.h:
 
@@ -208,7 +208,7 @@ gdbserver/st_util-gdb-server.o: gdbserver/gdb-server.c \
 
 /usr/include/netinet/in.h:
 
-/usr/lib/gcc/x86_64-linux-gnu/4.9/include/stdint.h:
+/usr/lib/gcc/x86_64-linux-gnu/5/include/stdint.h:
 
 /usr/include/stdint.h:
 
@@ -226,9 +226,9 @@ src/stlink-sg.h:
 
 /usr/include/x86_64-linux-gnu/sys/time.h:
 
-/usr/lib/gcc/x86_64-linux-gnu/4.9/include-fixed/limits.h:
+/usr/lib/gcc/x86_64-linux-gnu/5/include-fixed/limits.h:
 
-/usr/lib/gcc/x86_64-linux-gnu/4.9/include-fixed/syslimits.h:
+/usr/lib/gcc/x86_64-linux-gnu/5/include-fixed/syslimits.h:
 
 /usr/include/limits.h:
 
