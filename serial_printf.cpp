@@ -45,7 +45,7 @@ void serial_init(uint32_t baud)
     // configure USART3
     usart_set_baudrate(USART3, baud);
     usart_set_databits(USART3, 8);
-    usart_set_stopbits(USART3, USART_STOPBITS_1);
+    usart_set_stopbits(USART3, USART_STOPBITS_2); // increase stop bits to improve reliability
     usart_set_mode(USART3, USART_MODE_TX);
     usart_set_parity(USART3, USART_PARITY_NONE);
     usart_set_flow_control(USART3, USART_FLOWCONTROL_NONE);

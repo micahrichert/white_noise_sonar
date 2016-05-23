@@ -25,7 +25,7 @@ def read_N_bytes(ser, N, first_read_timeout=1.5, subsequent_read_timeout=0.5):
 def find_magic(ser):
     data_str = read_N_bytes(ser, 1*4)
     while True:
-        if np.fromstring(data_str, dtype=np.uint32) == 123:
+        if np.fromstring(data_str, dtype=np.uint32) == 0x12345678:
             return
         data_str = data_str[1:] + read_N_bytes(ser, 1)
 
@@ -43,8 +43,12 @@ def find_magic(ser):
 def read_merged_xcor_struct(ser):
     while True:
         find_magic(ser)
-        data = np.fromstring(read_N_bytes(ser, 7*4), dtype=np.uint32)
-        nr_samples, nr_bins, merge_bin_cnt, nr_inputs, nr_outputs, cycle_time, io_time = data
+        data = np.fromstring(read_N_bytes(ser, 8*4), dtype=np.uint32)
+        magic2, nr_samples, nr_bins, merge_bin_cnt, nr_inputs, nr_outputs, cycle_time, io_time = data
+        
+        if magic2 != 0x9ABCDEF0:
+            print "bad magic2"
+            continue
         
         if nr_samples <= 0 or nr_bins <= 0 or merge_bin_cnt <= 0 or nr_inputs <= 0 or nr_outputs <= 0:
             print "rejecting packet based upon receiving 0"
@@ -73,65 +77,55 @@ def read_merged_xcor_struct(ser):
 
 
 if __name__ == '__main__':
-    ser = serial.Serial('/dev/ttyUSB0', 115200*4, timeout=1)
+    ser = serial.Serial('/dev/ttyUSB0', 115200*16, parity=serial.PARITY_NONE, timeout=1)
 
     cum_p_thresh = 1.0-(1.0-scipy.stats.norm.cdf(3.0))*2  # number of sigmas/stds to normalize by
     print cum_p_thresh, scipy.stats.chi2.ppf(cum_p_thresh, 1)
-    xcors_time = []
-    white_xcors_time = []
+    xcors_time = [np.zeros(0)]
 
     cnt = 0
     cum1 = 0
     cum2 = 0
     cum_fft = 0
     cum_max = 0
+    prev_time = 0
     while (True):
         cnt += 1
-        nr_samples, nr_bins, merge_bin_cnt, nr_inputs, nr_outputs, cycle_time, io_time, merged_xcors = read_merged_xcor_struct(ser)
-
         if not READ_INPUT:
-            if np.any(np.isnan(merged_xcors)) or np.any(np.abs(merged_xcors) > (nr_samples*merge_bin_cnt)**2/100.0) or (merge_bin_cnt > 1 and np.any(merged_xcors<0)):
-                print "bad xcors"
-                continue
+            for i in range(3):
+                nr_samples, nr_bins, merge_bin_cnt, nr_inputs, nr_outputs, cycle_time, io_time, merged_xcors = read_merged_xcor_struct(ser)
 
-            merge_t = 100
-            merge_s = 1
-            
+                merged_xcors[np.isnan(merged_xcors)] = 0;
+                if True:#merge_bin_cnt > 1:
+                    merged_xcors[merged_xcors<0] = 0;
+    #            if np.any(np.isnan(merged_xcors)) or np.any(np.abs(merged_xcors) > (nr_samples*merge_bin_cnt)**2/100.0) or (merge_bin_cnt > 1 and np.any(merged_xcors<0)):
+    #                print "bad xcors"
+    #                continue
+
+                merge_t = 100
+                merge_s = 1
+                
+                merged_xcors=merged_xcors.reshape((-1, nr_inputs*nr_outputs))
+                
+                if merged_xcors.shape[0] != xcors_time[0].shape[0]:
+                    xcors_time = [] 
+                
+                xcors_time.append(merged_xcors)
+                if len(xcors_time) > merge_t:
+                    xcors_time = xcors_time[1:(merge_t+1)]
+
             thresh = scipy.stats.chi2.ppf(cum_p_thresh, merge_bin_cnt)*nr_samples
             thresh8 = scipy.stats.chi2.ppf(cum_p_thresh, merge_t*merge_s*merge_bin_cnt)*nr_samples
-
-            merged_xcors=merged_xcors.reshape((-1, nr_inputs*nr_outputs))
-            
-            xcors_conv = merged_xcors.copy()
-            white_xcors_conv = merged_xcors.copy()
-            for i in range(merged_xcors.shape[1]):
-                if merge_bin_cnt == 1:
-                    xcors_conv[:,i] = merged_xcors[:,i]**2
-                    xcors_conv[:,i] = np.abs(np.convolve(xcors_conv[:,i], np.ones(merge_s), 'same'))
-
-                    fft = np.fft.fft(merged_xcors[:,i]/np.sqrt(nr_samples), axis=0)
-                    white_xcor = np.real(np.fft.ifft(fft/np.abs(fft), axis=0))*np.sqrt(nr_samples)*np.sqrt(merged_xcors.shape[0])
-                    white_xcors_conv[:,i] = white_xcor**2
-                    white_xcors_conv[:,i] = np.abs(np.convolve(white_xcors_conv[:,i], np.ones(merge_s), 'same'))
-                    cum_max += np.max(white_xcors_conv[:,i]/thresh8)
-                else:
-                    xcors_conv[:,i] = np.convolve(merged_xcors[:,i], np.ones(merge_s), 'same') - np.convolve(merged_xcors[:,i], np.ones(merge_s)/merge_s, 'same') + merge_s*nr_samples*0
-            
-            xcors_time.append(xcors_conv)
-            if len(xcors_time) > merge_t:
-                xcors_time = xcors_time[1:(merge_t+1)]
-
-            white_xcors_time.append(white_xcors_conv)
-            if len(white_xcors_time) > merge_t:
-                white_xcors_time = white_xcors_time[1:(merge_t+1)]
 
             plt.cla()
             if merge_bin_cnt == 1:
 #                plt.plot(merged_xcors**2/thresh, '--')
     #            plt.plot(white_xcor**2/thresh,'--')
 #                plt.plot(np.sum(np.array(xcors_time), axis=0)/thresh8)
+#                for i in range(merged_xcors.shape[1]):
+#                    plt.subplot(merged_xcors.shape[1], 1, i+1)
                 try:
-                    plt.imshow(np.maximum(-1, np.minimum(1, np.array(xcors_time).squeeze()/np.max(np.abs(xcors_time)))))
+                    plt.imshow(np.maximum(-1, np.minimum(1, (np.array(xcors_time)[:,:,0])/thresh/10)))
                 except TypeError:
                     pass
     #            plt.plot(np.sum(np.array(white_xcors_time), axis=0)/thresh8, '.')
@@ -155,7 +149,6 @@ if __name__ == '__main__':
     #            cum1 += np.mean(merged_xcors[10:,:]**2/thresh>1)
     #            cum2 += np.mean((white_xcor[10:,:]*np.sqrt(nr_samples))**2/thresh>1)
                 cum1 += np.mean(np.sum(np.array(xcors_time)[:,1:], axis=0)/thresh8>1)
-                cum2 += np.mean(np.sum(np.array(white_xcors_time)[:,1:], axis=0)/thresh8>1)
                 print "%0.6f, %0.6f" % (cum1/cnt, cum2/cnt),
             else:
                 tmp = merged_xcors/thresh
@@ -165,6 +158,8 @@ if __name__ == '__main__':
                 print "%0.6f, %0.6f" % (np.mean(merged_xcors/thresh>1), np.mean(np.sum(np.array(xcors_time), axis=0)/thresh8>1)),
             plt.show()
         else:
+            nr_samples, nr_bins, merge_bin_cnt, nr_inputs, nr_outputs, cycle_time, io_time, merged_xcors = read_merged_xcor_struct(ser)
+
             input_str = ''
             for x in merged_xcors[:,0,0]:
                 input_str += np.binary_repr(x, width=32)
@@ -172,4 +167,5 @@ if __name__ == '__main__':
             plt.cla()
             plt.plot(np.abs(np.fft.fft(input_data-np.mean(input_data))))
             plt.show()
-        print cycle_time, io_time, cum_max/cnt, np.max(np.abs(xcors_time))
+        print cycle_time, io_time, cnt, time.time()-prev_time, np.max(np.abs(xcors_time))
+        prev_time = time.time()

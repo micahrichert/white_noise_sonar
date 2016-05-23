@@ -7,6 +7,11 @@
 #include "serial_printf.cpp"
 #include "clock.cpp"
 
+#define USE_BUILTIN 0  // slow on stm32 but may be fast on other chips
+#define USE_PARALLEL_BITS 0  // slower than lookup but doesn't use any memory
+#define USE_LOOKUP 1  // fastest solution on stm32 but uses 64K of memory
+#include "popcount.cpp"
+
 /*
 Chi2 significance threshold table generated with the following python code:
 
@@ -38,41 +43,45 @@ const float chi2_threshs[100] = {  9.0 ,   11.83,   14.16,   16.25,   18.21,   2
 #define HIST_TYPE_BITS (sizeof(HIST_TYPE)*8)
 
 #define RECORD_INPUT 0
-#define CHI2 1
 
-const int NOISE_LEVEL = 30; // add hysteresis to input when using analog/ADC
-const int USE_ANALOG_INPUT = 1;
-const int NR_OUTPUTS = 1;
-const int NR_INPUTS = 1;
+const unsigned int NOISE_LEVEL = 30; // add hysteresis to input when using analog/ADC
+const bool USE_ANALOG_INPUT = true;
+const unsigned int NR_OUTPUTS = 1;
+const unsigned int NR_INPUTS = 1;
 const float MAX_DISTANCE = 1.5;//1.5; // m
-//const float TIME_LAG = 0.0000; // s, time to shift xcor analysis by to compensate for speaker lag
-const int SAMPLE_LAG = 1;//TIME_LAG*SAMPLE_RATE + 1; // add 1 because inputs are always sampled time step behind
-//const float DESIRED_OUTPUT_BIN_DISTANCE = 0.05; // m, set desired value but ACTUAL_OUTPUT_BIN_DISTANCE is what is used
-const int MERGE_BIN_CNT = 1;//DESIRED_OUTPUT_BIN_DISTANCE/DISTANCE_PER_SAMPLE;
+const int SAMPLE_LAG = 0;  // must be a multiple of HIST_TYPE_BITS
+const unsigned int MERGE_BIN_CNT = 1;
+const float MAX_SPEED = 1.1;  // m/s
+const unsigned int NR_SPEEDS = 10;
 #if (RECORD_INPUT)
     const float XCOR_DECAY_TIME = 1.0;
-    const int NOP_LOOP = 270;
+    const unsigned int NOP_LOOP = 270;
 #else
-    const float XCOR_DECAY_TIME = 0.05;//0.05;//1.0; // s
-    const int NOP_LOOP = 0;
+    const float XCOR_DECAY_TIME = 0.10;//0.05;//1.0; // s
+    const unsigned int NOP_LOOP = 0;
 #endif
 //const float SAMPLE_RATE = 75000; // Hz //3in, 2out at 1.5m
 //const float SAMPLE_RATE = 75000; // Hz //3in, 2out at 1.5m
 //const float SAMPLE_RATE = 88000; // Hz //2in, 2out at 1.5m
 //const float SAMPLE_RATE = 111500; // Hz //1in, 2out at 1.5m
+//const float SAMPLE_RATE = 47000; // Hz //1in, 2out at 1.5m, 10speeds
 //const float SAMPLE_RATE = 89500; // Hz //4in, 1out at 1.5m
 //const float SAMPLE_RATE = 96500; // Hz //3in, 1out at 1.5m
 //const float SAMPLE_RATE = 121000; // Hz //2in, 1out at 1.5m
-const float SAMPLE_RATE = 140000; // Hz //1in, 1out at 1.5m
+//const float SAMPLE_RATE = 140000; // Hz //1in, 1out at 1.5m
+const float SAMPLE_RATE = 77000; // Hz //1in, 1out at 1.5m, 10speeds
 const float SPEED_OF_SOUND = 340.3/2.0; // m/s, divide by 2 because sound travels out and back
 
 // dependant variables
 const float DISTANCE_PER_SAMPLE = SPEED_OF_SOUND/SAMPLE_RATE;
 const float ACTUAL_OUTPUT_BIN_DISTANCE = MERGE_BIN_CNT*DISTANCE_PER_SAMPLE; // m, see DESIRED_OUTPUT_BIN_DISTANCE
-const int NR_BINS = (int(MAX_DISTANCE/DISTANCE_PER_SAMPLE)+31)/32*32; // should be multiple of 32, round up //int(MAX_DISTANCE/DISTANCE_PER_SAMPLE)/MERGE_BIN_CNT*MERGE_BIN_CNT; // make sure NR_BINS is a multple of merge
+const unsigned int NR_BINS = (int(MAX_DISTANCE/DISTANCE_PER_SAMPLE)+31)/32*32-1; // should be multiple of 32-1, round up //int(MAX_DISTANCE/DISTANCE_PER_SAMPLE)/MERGE_BIN_CNT*MERGE_BIN_CNT; // make sure NR_BINS is a multple of merge
 const int XCOR_DECAY_SAMPLES = SAMPLE_RATE * XCOR_DECAY_TIME;
 const float XCOR_DECAY_RATE = 1.0 - 1.0/XCOR_DECAY_SAMPLES;
-const int HISTORY_LEN = NR_BINS/32 + (SAMPLE_LAG+31)/32;
+const float MAX_SPEED_DILATION = MAX_SPEED/DISTANCE_PER_SAMPLE/SAMPLE_RATE;
+const float SPEED_DILATION_STEP = MAX_SPEED_DILATION/NR_SPEEDS;
+const unsigned int EXTRA_DILATION_BINS = int(MAX_SPEED_DILATION*XCOR_DECAY_SAMPLES);
+const unsigned int HISTORY_LEN = NR_BINS/32 + (SAMPLE_LAG+EXTRA_DILATION_BINS+31)/32;
 
 inline uint32_t pin_to_ADC(uint8_t apin)
 {
@@ -84,7 +93,7 @@ inline uint32_t pin_to_ADC(uint8_t apin)
 void setup()
 {
     clock_setup();
-    serial_init(115200*4);
+    serial_init(115200*16);
 //    serial_printf(true, "Starting up\r\n");
 
     rcc_periph_clock_enable(RCC_GPIOB);
@@ -125,8 +134,11 @@ void setup()
         }
     }
     
+    // enable the RNG
 	rcc_periph_clock_enable(RCC_RNG);
 	RNG_CR |= RNG_CR_RNGEN;
+	
+	popcount_setup();
 }
 
 uint32_t real_rand()
@@ -142,29 +154,10 @@ inline void insert_bit(HIST_TYPE* buf, HIST_TYPE bit, int16_t loc)
     buf[i] = (buf[i]&(~(HIST_TYPE(1)<<offset))) | (bit << offset);
 }
 
-// a little slower than using lookup table but doesn't require any memory
-inline unsigned int bitcount32(uint32_t i)
-{
-  //Parallel binary bit add
-  i = i - ((i >> 1) & 0x55555555);
-  i = (i & 0x33333333) + ((i >> 2) & 0x33333333);
-  return (((i + (i >> 4)) & 0xF0F0F0F) * 0x1010101) >> 24;
-}
-
-// very fast but uses 64K of memory
-uint8_t wordbits[65536]; // use 64K of memory but fastest implementation
-inline int popcount32_tbl(uint32_t i)
-{
-    return (wordbits[i&0xFFFF] + wordbits[i>>16]);
-}
-
-//__builtin_popcount(i) // some instruction sets have a dedicated instruction for popcount, in which case the builtin will be fastest, 
-// but if there isn't a special instruction then __builtin_popcount() is quite slow.
-#define POPCNT(i) popcount32_tbl(i) // bitcount32(i)
-
 typedef struct
 {
     uint32_t magic;
+    uint32_t magic2;
     uint32_t nr_samples;
     uint32_t nr_bins;
     uint32_t merge_bin_cnt;
@@ -185,10 +178,10 @@ int main(void)
 // sigma = norm_inverse_cdf(p/2), divide by 2 because we are using a single-tailed test.
 // significant if xcors**2 > sum((input-mean_input)**2)*sigma**2
 
-    int32_t xcors[NR_BINS][NR_INPUTS][NR_OUTPUTS] = {0};
+    int32_t xcors[NR_SPEEDS][NR_BINS+EXTRA_DILATION_BINS][NR_INPUTS][NR_OUTPUTS] = {0};
     merged_xcors_struct_t merged_xcors_structs[2] = {
-        {.magic=123, .nr_samples=XCOR_DECAY_SAMPLES, .nr_bins=NR_BINS, .merge_bin_cnt=MERGE_BIN_CNT, .nr_inputs=NR_INPUTS, .nr_outputs=NR_OUTPUTS},
-        {.magic=123, .nr_samples=XCOR_DECAY_SAMPLES, .nr_bins=NR_BINS, .merge_bin_cnt=MERGE_BIN_CNT, .nr_inputs=NR_INPUTS, .nr_outputs=NR_OUTPUTS}};
+        {.magic=0x12345678, .magic2=0x9ABCDEF0, .nr_samples=XCOR_DECAY_SAMPLES, .nr_bins=NR_BINS, .merge_bin_cnt=MERGE_BIN_CNT, .nr_inputs=NR_INPUTS, .nr_outputs=NR_OUTPUTS},
+        {.magic=0x12345678, .magic2=0x9ABCDEF0, .nr_samples=XCOR_DECAY_SAMPLES, .nr_bins=NR_BINS, .merge_bin_cnt=MERGE_BIN_CNT, .nr_inputs=NR_INPUTS, .nr_outputs=NR_OUTPUTS}};
     int merged_xcors_ind = 0;
     HIST_TYPE rand_hist[NR_OUTPUTS][HISTORY_LEN] = {0};
     HIST_TYPE input[NR_INPUTS] = {0};
@@ -196,9 +189,11 @@ int main(void)
     uint32_t t = 0;
     uint32_t start_time = 0;
     uint32_t rnd = 0;
-    uint8_t calc_phase = (-1 & (HIST_TYPE_BITS-1)); // & with 31 to ensure it is always between 0 and 31, even when negative; % keeps sign.
+    int calc_phase;
+    float dilations[NR_SPEEDS] = {0};
     int16_t bit_pos = 0;
-    int hist_i, xcor_i;
+    int hist_i;
+    int xcor_i[NR_SPEEDS];
     int decay_i = 0;
     int r;
     bool adc_too_slow = false;
@@ -207,10 +202,11 @@ int main(void)
     bool first_time = true;
     bool do_reset = true;
     bool reset_done = true;
-    
-    for (uint32_t i=0; i<65536; i++) wordbits[i] = __builtin_popcount(i);
+    int reset_cnt = 0;
     
     setup();
+    
+    calc_phase = (-1 & (HIST_TYPE_BITS-1)); // & with 31 to ensure it is always between 0 and 31, even when negative; % keeps sign.
 
     // select a2d input pin and start the conversion
     for (uint8_t apin=0; apin<NR_INPUTS; apin++)
@@ -236,8 +232,8 @@ int main(void)
             else gpio_clear(GPIOB, 1<<dpin);
         }
 
-        hist_i = (bit_pos+(HIST_TYPE_BITS-1)+SAMPLE_LAG)/HIST_TYPE_BITS; // the 32bits we want start 31 bits back (positive values are back in time)
-        xcor_i = calc_phase;
+        hist_i = (bit_pos+(HIST_TYPE_BITS-1)+1+SAMPLE_LAG)/HIST_TYPE_BITS; // the 32bits we want start 31 bits back (positive values are back in time)
+        for (int s=0; s<NR_SPEEDS;s++) xcor_i[s] = calc_phase + dilations[s];
 #if (!RECORD_INPUT)
         do
         {
@@ -248,15 +244,23 @@ int main(void)
                 for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
                 {
                     HIST_TYPE shift_hist = rand_hist[dpin][hist_i];
+                    int xcor = popcount(shift_hist ^ input_apin)*2 - HIST_TYPE_BITS; // count the number of 1s in the 32 bits *2 (for unit variance) and subtract the mean
                     
                     //compute actual xcross-correlation
-                    xcors[xcor_i][apin][dpin] += POPCNT(shift_hist ^ input_apin)*2 - HIST_TYPE_BITS; // count the number of 1s in the 32 bits *2 (for unit variance) and subtract the mean
+                    for (int s=0; s<NR_SPEEDS;s++) xcors[s][xcor_i[s]][apin][dpin] += xcor;
                 }
             }
             
-            xcor_i += HIST_TYPE_BITS;
+            for (int s=0; s<NR_SPEEDS;s++) xcor_i[s] += HIST_TYPE_BITS;
             hist_i++;
-        } while (xcor_i<NR_BINS);
+        } while (xcor_i[0]<NR_BINS);
+
+        calc_phase += 1;
+        calc_phase %= 32;
+        for (int s=0; s<NR_SPEEDS;s++)
+        {
+            dilations[s] += SPEED_DILATION_STEP*s;
+        }
 #endif
         t += 1;
         if (decay_i == 0)
@@ -265,6 +269,7 @@ int main(void)
             {
                 merged_xcors_structs[merged_xcors_ind].nr_samples = t;
                 t = 0;
+                for (int s=0; s<NR_SPEEDS;s++) dilations[s] = 0;
                 do_reset = true;
             } else {
                 if (do_reset) reset_done = true;
@@ -278,34 +283,24 @@ int main(void)
         {
             for (uint8_t apin=0; apin<NR_INPUTS; apin++)
             {
-#if (!CHI2)
                 if (do_reset)
                 {
                     if (MERGE_BIN_CNT == 1)
-                        merged_xcors_structs[merged_xcors_ind].merged_xcors[decay_i/MERGE_BIN_CNT][apin][dpin] = xcors[decay_i][apin][dpin];
-                    else
-                        merged_xcors_structs[merged_xcors_ind].merged_xcors[decay_i/MERGE_BIN_CNT][apin][dpin] += xcors[decay_i][apin][dpin]*xcors[decay_i][apin][dpin];
-                    xcors[decay_i][apin][dpin] = 0;
+                        merged_xcors_structs[merged_xcors_ind].merged_xcors[decay_i/MERGE_BIN_CNT][apin][dpin] = xcors[0][decay_i][apin][dpin]*xcors[0][decay_i][apin][dpin];
+                        for (int s=1; s<NR_SPEEDS;s++)
+                            merged_xcors_structs[merged_xcors_ind].merged_xcors[decay_i/MERGE_BIN_CNT][apin][dpin] += xcors[s][decay_i][apin][dpin]*xcors[s][decay_i][apin][dpin];
+//                    else
+//                        merged_xcors_structs[merged_xcors_ind].merged_xcors[decay_i/MERGE_BIN_CNT][apin][dpin] += xcors[decay_i][apin][dpin]*xcors[decay_i][apin][dpin];
+                    for (int s=0; s<NR_SPEEDS;s++) xcors[s][decay_i][apin][dpin] = 0;
                 } else {
                     // a little wasteful to put this assignment here but makes the loop times more consistent
                     merged_xcors_structs[merged_xcors_ind].merged_xcors[decay_i/MERGE_BIN_CNT][apin][dpin] = 0;
                 }
-#else
-                if (do_reset)
-                {
-                    merged_xcors_structs[merged_xcors_ind].merged_xcors[decay_i/MERGE_BIN_CNT][apin][dpin] = xcors[decay_i][apin][dpin]*xcors[decay_i][apin][dpin];
-                } else {
-                    merged_xcors_structs[merged_xcors_ind].merged_xcors[decay_i/MERGE_BIN_CNT][apin][dpin] += xcors[decay_i][apin][dpin]*xcors[decay_i][apin][dpin];
-                }
-                xcors[decay_i][apin][dpin] = 0;
-#endif
             }
         }
         decay_i++;
         if (decay_i >= NR_BINS) decay_i = 0;
 #endif
-        calc_phase++;
-        calc_phase %= HIST_TYPE_BITS;
         bit_pos--;
         if (bit_pos<0) bit_pos += HISTORY_LEN*HIST_TYPE_BITS;
         
@@ -333,12 +328,12 @@ int main(void)
                 tmp_in = adc_read_regular(adc);
                 if ((tmp_in - previous_input[apin] < NOISE_LEVEL) & (tmp_in - previous_input[apin] > -NOISE_LEVEL))
                     // if we don't exceed the required change threshold then just repeat the previous input value
-                    input[apin] |= (input[apin]&0x2)>>1;
+                    input[apin] |= ((input[apin]&0x2)>>1)*0x1;
                 else
-                    input[apin] |= tmp_in > previous_input[apin];
+                    input[apin] |= (tmp_in > previous_input[apin])*0x1;
                 previous_input[apin] = tmp_in;
             } else {
-                input[apin] |= gpio_get(GPIOA, 1<<apin)>>apin;
+                input[apin] |= (gpio_get(GPIOA, 1<<apin)>>apin)*0x1;
             }
         }
 
@@ -346,6 +341,7 @@ int main(void)
         {
             int start_io_time = get_time_us();
             reset_done = false;
+            reset_cnt += 1;
             
             //transfer merged_xcors over serial using dma
             merged_xcors_structs[merged_xcors_ind].cycle_time = cycle_time;
