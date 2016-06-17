@@ -22,7 +22,7 @@ inline uint32_t pin_to_ADC(uint8_t apin)
 void setup()
 {
     clock_setup();
-    serial_init(1500000);
+    serial_init(2500000);
 
     rcc_periph_clock_enable(RCC_GPIOB);
 
@@ -158,6 +158,7 @@ int main(void)
 
             // delta_time_us/1000000.0 < 32.0/SAMPLE_RATE
             if (((get_time_us() - start_time)*(SAMPLE_RATE/1000)) < (32*(1000000/1000))) NOP_count += 1;
+//            else NOP_count -= 1;
             start_time = get_time_us();
         }
     }

@@ -10,5 +10,4 @@ arm-none-eabi-gcc -O3 -fpermissive -fsingle-precision-constant -std=c++11 -mlitt
 arm-none-eabi-objcopy -Obinary white_noise.elf white_noise.bin
 ./flash_and_reboot.sh white_noise.bin
 
-
-g++ -O3 -mtune=native reader.cpp -lopencv_core -lopencv_highgui -o reader
+g++ -O3 -std=c++11 -march=native -mtune=native reader.cpp -lopencv_core -lopencv_highgui -o reader
