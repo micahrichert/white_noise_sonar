@@ -55,32 +55,32 @@ if __name__ == '__main__':
 
     cnt = 0
     prev_count, inputs, outputs = read_packet(ser)
-    
+    nr_inputs = inputs.size
 
     start_time = time.time()
-    abs_fft = 0
+    abs_fft = [0]*nr_inputs
     fft_cnt = 0
     while True:
         ins = []
-        for i in range(450000/32):
+        for i in range(160000/32):
             cnt += 1
             count, inputs, outputs = read_packet(ser)
             if np.uint8(prev_count+1) != count:
                 print "dropped packets?", prev_count, count
             prev_count = count
-            if inputs.size == 1:
+            if inputs.size == nr_inputs:
                 ins.append(inputs)
         try:
-            bins = [np.fromstring(format(int(i), '032b'), dtype=np.uint8)-ord('0') for i in ins]
-        except:
-            print i
-        inputs = np.array(bins).reshape(-1)
-        try:
-            abs_fft += np.abs(np.fft.fft(inputs-np.mean(inputs)))
+            for j in range(nr_inputs):
+                bins = [np.fromstring(format(int(i[j]), '032b'), dtype=np.uint8)-ord('0') for i in ins]
+                inputs = np.array(bins).reshape(-1)
+                abs_fft[j] = np.abs(np.fft.fft(inputs-np.mean(inputs)))
             fft_cnt += 1
+            plt.clf()
+            for j in range(nr_inputs):
+                plt.subplot(1, nr_inputs, j+1)
+                plt.plot(abs_fft[j]/fft_cnt)
+            plt.show()
         except:
-            pass
-        plt.clf()
-        plt.plot(abs_fft/fft_cnt)
-        plt.show()
+            raise
         

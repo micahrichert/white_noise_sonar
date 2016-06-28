@@ -202,6 +202,8 @@ int main()
     packet_t p;
     uint8_t prev_packet_cnt = 0;
     int display_cnt = 0;
+    uint32_t input_copy;
+    float ave_input[NR_INPUTS] = {0};
     
     popcount_setup();
 
@@ -222,6 +224,7 @@ int main()
         read_packet(fd, &p);
         if (uint8_t(prev_packet_cnt+1) != p.count) printf("dropped packet %d %d\n",prev_packet_cnt, p.count);
         prev_packet_cnt = p.count;
+        input_copy = p.inputs[1];
         
         cnt += 1;
         for (int i = -1; i<31; i++)
@@ -312,8 +315,8 @@ int main()
                     for (uint8_t apin=0; apin<p.nr_inputs; apin++)
                     {
 
-                        memcpy(merged_xcors_hist[apin][dpin], &merged_xcors_hist[apin][dpin][1][0], sizeof(merged_xcors_hist[0][0])*99/100);
-                        memcpy(&merged_xcors_hist[apin][dpin][99][0], &merged_xcors[apin][dpin][0], sizeof(merged_xcors[0][0]));
+                        memmove(merged_xcors_hist[apin][dpin], &merged_xcors_hist[apin][dpin][1][0], sizeof(merged_xcors_hist[0][0])*99/100);
+                        memcpy(&merged_xcors_hist[apin][dpin][99][0], &merged_xcors[apin][dpin][0], sizeof(float)*(NR_BINS/MERGE_BIN_CNT));
 
                         if (bytes_avail < 100)
                         {
@@ -326,12 +329,18 @@ int main()
                                     if (merged_xcors_hist[apin][dpin][k][j] < min_val) min_val = merged_xcors_hist[apin][dpin][k][j];
                                 }
                             }
+                            if (max_val == min_val) max_val = min_val + 1;
+
                             float cum = 0;
                             for (int k=0;k<100;k++)
                             {
                                 for (int j=0;j<NR_BINS/MERGE_BIN_CNT;j++)
                                 {
-                                    scaled_merged_xcors_hist[apin][dpin][k][j] = max(0.0, merged_xcors_hist[apin][dpin][k][j] - min_val)/(max_val - min_val);
+                                    float val = max(0.0, merged_xcors_hist[apin][dpin][k][j] - min_val)/(max_val - min_val);
+                                    
+                                    if (MERGE_BIN_CNT > 1 || USE_VARIANCE) val = sqrt(val);
+                                
+                                    scaled_merged_xcors_hist[apin][dpin][k][j] = val;
                                 }
                                 cum += scaled_merged_xcors_hist[apin][dpin][k][NR_BINS/MERGE_BIN_CNT/2];
                             }
@@ -342,6 +351,12 @@ int main()
                             tile.copyTo(tiled_images(Rect(tile.cols*dpin, tile.rows*apin, tile.cols, tile.rows)));
                         }
                     }
+                }
+                printf(" 0x%x", input_copy);
+                
+                for (int apin=0; apin<p.nr_inputs; apin++)
+                {
+                    printf(" %f", ave_input[apin]);
                 }
                 printf("\n");
                 if (bytes_avail < 100)
@@ -374,6 +389,9 @@ int main()
 
                 input[apin] <<= 1;
                 input[apin] |= r;
+                
+                ave_input[apin] *= 0.9999;
+                ave_input[apin] += 0.0001*r;
             }
         }
     }

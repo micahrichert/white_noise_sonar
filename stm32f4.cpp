@@ -10,7 +10,8 @@
 
 #include "config.h"
 
-const int NOISE_LEVEL = 0; // add hysteresis to input when using analog/ADC
+constexpr int NOISE_LEVEL = 0; // add hysteresis to input when using analog/ADC
+constexpr bool USE_ANALOG_INPUT = false;
 
 inline uint32_t pin_to_ADC(uint8_t apin)
 {
@@ -23,35 +24,46 @@ void setup()
 {
     clock_setup();
     serial_init(2500000);
+    dma_disable_transfer_complete_interrupt(DMA1, DMA_STREAM3);
+    dma_disable_transfer_error_interrupt(DMA1, DMA_STREAM3);
 
     rcc_periph_clock_enable(RCC_GPIOB);
 
     for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
     {
         gpio_mode_setup(GPIOB, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1<<dpin); // Use PB0...
+        gpio_set_output_options(GPIOB, GPIO_OTYPE_OD, GPIO_OSPEED_2MHZ, 1<<dpin); // Use PB0...
     }
     
 	rcc_periph_clock_enable(RCC_GPIOA);
-    rcc_periph_clock_enable(RCC_ADC1);
-    rcc_periph_clock_enable(RCC_ADC2);
-    rcc_periph_clock_enable(RCC_ADC3);
+    if (USE_ANALOG_INPUT)
+    {
+        rcc_periph_clock_enable(RCC_ADC1);
+        rcc_periph_clock_enable(RCC_ADC2);
+        rcc_periph_clock_enable(RCC_ADC3);
+    }
 
 	for (uint8_t apin=0; apin<NR_INPUTS; apin++)
 	{
-        uint32_t adc = pin_to_ADC(apin);
+        if (USE_ANALOG_INPUT)
+        {
+            uint32_t adc = pin_to_ADC(apin);
 
-        gpio_mode_setup(GPIOA, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, 1<<apin); // Use PA0...
+            gpio_mode_setup(GPIOA, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, 1<<apin); // Use PA0...
+        
+            adc_off(adc);
 
-        adc_off(adc);
-
-        adc_disable_external_trigger_regular(adc);
-        adc_disable_scan_mode(adc);
-        adc_disable_eoc_interrupt(adc);
-	    adc_set_single_conversion_mode(adc);
-        adc_set_continuous_conversion_mode(adc);
-        adc_set_sample_time_on_all_channels(adc, ADC_SMPR_SMP_3CYC); // need to play with this value and the prescaler
-        adc_set_clk_prescale(ADC_CCR_ADCPRE_BY8);  // prescaler defaults to 2 at startup
-        adc_power_on(adc);
+            adc_disable_external_trigger_regular(adc);
+            adc_disable_scan_mode(adc);
+            adc_disable_eoc_interrupt(adc);
+	        adc_set_single_conversion_mode(adc);
+            adc_set_continuous_conversion_mode(adc);
+            adc_set_sample_time_on_all_channels(adc, ADC_SMPR_SMP_3CYC); // need to play with this value and the prescaler
+            adc_set_clk_prescale(ADC_CCR_ADCPRE_BY8);  // prescaler defaults to 2 at startup
+            adc_power_on(adc);
+        } else {
+            gpio_mode_setup(GPIOA, GPIO_MODE_INPUT, GPIO_PUPD_NONE, 1<<apin); // Use PA0...
+        }
     }
     
     // enable the RNG
@@ -78,26 +90,28 @@ typedef struct
 int main(void)
 {
     // use triple buffering because the dma transfer takes a little time to initiate
-    packet_t packets[3] = {
-        {.magic=0xA1, .count=0, .nr_inputs=NR_INPUTS, .nr_outputs=NR_OUTPUTS},
+    packet_t packets[2] = {
         {.magic=0xA1, .count=0, .nr_inputs=NR_INPUTS, .nr_outputs=NR_OUTPUTS},
         {.magic=0xA1, .count=0, .nr_inputs=NR_INPUTS, .nr_outputs=NR_OUTPUTS},
     };
     int packet_id = 0;
     int previous_input[NR_INPUTS];
     uint32_t start_time;
-    uint32_t NOP_count = 0;
+    int32_t NOP_count = 0;
     uint32_t t = 0;
     uint32_t transmit_count = 0;
     
     setup();
     
-    // select a2d input pin and start the conversion
-    for (uint8_t apin=0; apin<NR_INPUTS; apin++)
+    if (USE_ANALOG_INPUT)
     {
-        uint32_t adc = pin_to_ADC(apin);
-        adc_set_regular_sequence(adc, 1, &apin);
-    	adc_start_conversion_regular(adc);
+        // select a2d input pin and start the conversion
+        for (uint8_t apin=0; apin<NR_INPUTS; apin++)
+        {
+            uint32_t adc = pin_to_ADC(apin);
+            adc_set_regular_sequence(adc, 1, &apin);
+        	adc_start_conversion_regular(adc);
+        }
     }
 
     start_time = get_time_us();
@@ -105,39 +119,46 @@ int main(void)
     {
         uint32_t rnd = real_rand();
 
-        uint32_t set_bits=0, clear_bits=0;
+        uint32_t set_bits=0;
         for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
         {
             bool r = (rnd&(1<<(dpin)))>>dpin;
             packets[packet_id].outputs[dpin] <<= 1;
             packets[packet_id].outputs[dpin] |= r;
             if (r) set_bits |= (1<<dpin);
-            else clear_bits |= (1<<dpin);
         }
-        gpio_set(GPIOB, set_bits);
-        gpio_clear(GPIOB, clear_bits);
-
-        for (int tmp=0;tmp<NOP_count;tmp++) asm("nop");
+        gpio_port_write(GPIOB, set_bits);
 
         // read input
-        for (uint8_t apin=0; apin<NR_INPUTS; apin++)
+        if (USE_ANALOG_INPUT)
         {
-    	    uint32_t adc = pin_to_ADC(apin);
+            for (uint8_t apin=0; apin<NR_INPUTS; apin++)
+            {
+        	    uint32_t adc = pin_to_ADC(apin);
 
-            // wait for ADC
-            while (!adc_eoc(adc));
+                // wait for ADC
+                while (!adc_eoc(adc));
+                
+                int tmp_in = adc_read_regular(adc);
+
+                packets[packet_id].inputs[apin] <<= 1;
+
+                if ((tmp_in - previous_input[apin] < NOISE_LEVEL) & (tmp_in - previous_input[apin] > -NOISE_LEVEL))
+                    // if we don't exceed the required change threshold then just repeat the previous input value
+                    packets[packet_id].inputs[apin] |= (packets[packet_id].inputs[apin]&0x2)>>1;
+                else
+                    packets[packet_id].inputs[apin] |= tmp_in > previous_input[apin];
+
+                previous_input[apin] = tmp_in;
+            }
+        } else {
+            uint16_t in = gpio_port_read(GPIOA);
             
-            int tmp_in = adc_read_regular(adc);
-
-            packets[packet_id].inputs[apin] <<= 1;
-
-            if ((tmp_in - previous_input[apin] < NOISE_LEVEL) & (tmp_in - previous_input[apin] > -NOISE_LEVEL))
-                // if we don't exceed the required change threshold then just repeat the previous input value
-                packets[packet_id].inputs[apin] |= (packets[packet_id].inputs[apin]&0x2)>>1;
-            else
-                packets[packet_id].inputs[apin] |= tmp_in > previous_input[apin];
-
-            previous_input[apin] = tmp_in;
+            for (uint8_t apin=0; apin<NR_INPUTS; apin++)
+            {
+                packets[packet_id].inputs[apin] <<= 1;
+                packets[packet_id].inputs[apin] |= (in & (1<<apin)) >> apin;
+            }
         }
         
         t += 1;
@@ -150,6 +171,7 @@ int main(void)
             dma_set_memory_address(DMA1, DMA_STREAM3, (uint32_t)&packets[packet_id]);
             dma_set_number_of_data(DMA1, DMA_STREAM3, sizeof(packet_t));
 
+            dma_clear_interrupt_flags(DMA1, DMA_STREAM3, DMA_LISR_TCIF0);
             usart_enable_tx_dma(USART3);
             dma_enable_stream(DMA1, DMA_STREAM3);
 
@@ -158,8 +180,11 @@ int main(void)
 
             // delta_time_us/1000000.0 < 32.0/SAMPLE_RATE
             if (((get_time_us() - start_time)*(SAMPLE_RATE/1000)) < (32*(1000000/1000))) NOP_count += 1;
-//            else NOP_count -= 1;
             start_time = get_time_us();
+
+            for (int tmp=0;tmp<NOP_count-40;tmp++) asm("nop");
+        } else {
+            for (int tmp=0;tmp<NOP_count;tmp++) asm("nop");
         }
     }
 }
