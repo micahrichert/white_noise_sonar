@@ -87,6 +87,8 @@ typedef struct
     uint32_t outputs[NR_OUTPUTS];
 } __attribute__((packed)) packet_t;
 
+constexpr int NR_SAMPLES = XCOR_DISPLAY_TIME*SAMPLE_RATE;
+
 int main(void)
 {
     // use triple buffering because the dma transfer takes a little time to initiate
@@ -96,6 +98,7 @@ int main(void)
     };
     int packet_id = 0;
     int previous_input[NR_INPUTS];
+    float ave_output[NR_OUTPUTS];
     uint32_t start_time;
     int32_t NOP_count = 0;
     uint32_t t = 0;
@@ -114,6 +117,14 @@ int main(void)
         }
     }
 
+    if (USE_AVE_OUTPUT)
+    {
+        for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
+        {
+            ave_output[dpin] = NR_SAMPLES/2;
+        }
+    }
+
     start_time = get_time_us();
     while (true)
     {
@@ -122,7 +133,16 @@ int main(void)
         uint32_t set_bits=0;
         for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
         {
-            bool r = (rnd&(1<<(dpin)))>>dpin;
+            bool r;
+            if (USE_AVE_OUTPUT)
+            {
+                constexpr int RND_BITS = 1;
+                r = int((rnd>>(dpin*RND_BITS))&((1<<RND_BITS)-1))*2-((1<<RND_BITS)-1)-(ave_output[dpin]-NR_SAMPLES/2) > 0;
+                ave_output[dpin] *= (1.0-1.0/NR_SAMPLES);
+                ave_output[dpin] += r;
+            } else {
+                r = (rnd&(1<<(dpin)))>>dpin;
+            }
             packets[packet_id].outputs[dpin] <<= 1;
             packets[packet_id].outputs[dpin] |= r;
             if (r) set_bits |= (1<<dpin);

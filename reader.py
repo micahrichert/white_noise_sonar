@@ -75,7 +75,7 @@ if __name__ == '__main__':
                 bins = [np.fromstring(format(int(i[j]), '032b'), dtype=np.uint8)-ord('0') for i in ins]
                 inputs = np.array(bins).reshape(-1)
                 abs_fft[j] = np.abs(np.fft.fft(inputs-np.mean(inputs)))
-            fft_cnt += 1
+            fft_cnt = 1
             plt.clf()
             for j in range(nr_inputs):
                 plt.subplot(1, nr_inputs, j+1)

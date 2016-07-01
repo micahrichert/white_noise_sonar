@@ -181,7 +181,7 @@ static_assert(NR_SPEEDS>0, "invalid NR_SPEEDS");
 static_assert(NR_BINS+EXTRA_DILATION_BINS>0, "invalid NR BINS");
 static_assert(HISTORY_LEN>0, "invalid HISTORY_LEN");
 float merged_xcors[NR_INPUTS][NR_OUTPUTS][NR_BINS/MERGE_BIN_CNT];
-int32_t xcors[NR_SPEEDS][NR_BINS+EXTRA_DILATION_BINS][NR_INPUTS][NR_OUTPUTS];
+int32_t xcors[NR_SPEEDS][NR_BINS+EXTRA_DILATION_BINS][NR_INPUTS+1][NR_OUTPUTS];
 HIST_TYPE rand_hist[NR_OUTPUTS][HISTORY_LEN];
 HIST_TYPE input[NR_INPUTS];
 float dilations[NR_SPEEDS];
@@ -204,6 +204,7 @@ int main()
     int display_cnt = 0;
     uint32_t input_copy;
     float ave_input[NR_INPUTS] = {0};
+    int output_sum[NR_OUTPUTS] = {0};
     
     popcount_setup();
 
@@ -236,17 +237,19 @@ int main()
                 bool r = p.outputs[dpin] & (1UL<<31);
                 p.outputs[dpin] <<= 1;
                 insert_bit(rand_hist[dpin], r, bit_pos);
+                output_sum[dpin] += r;
             }
 
             hist_i = (bit_pos+(HIST_TYPE_BITS-1)+1+SAMPLE_LAG)/HIST_TYPE_BITS; // the 32bits we want start 31 bits back (positive values are back in time)
             for (int s=0; s<NR_SPEEDS;s++) xcor_i[s] = calc_phase + dilations[s];
+            
             do
             {
                 if (hist_i>=int(HISTORY_LEN)) hist_i-=HISTORY_LEN;
                 int tmp = hist_i;
-                for (uint8_t apin=0; apin<NR_INPUTS; apin++)
+                for (uint8_t apin=0; apin<NR_INPUTS+1; apin++)
                 {
-                    HIST_TYPE input_apin = input[apin];
+                    HIST_TYPE input_apin = (apin<NR_INPUTS)?input[apin]:0;
                     for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
                     {
                         HIST_TYPE shift_hist = rand_hist[dpin][hist_i];
@@ -257,6 +260,7 @@ int main()
                         {
                             assert(xcor_i[s] >= 0);
                             assert(xcor_i[s] < NR_BINS+EXTRA_DILATION_BINS);
+//                            if (s==0&&apin==NR_INPUTS&&xcor_i[s]==0) printf("%d %d %d 0x%x %d\n",output_sum[dpin],xcors[s][xcor_i[s]][apin][dpin],xcor,shift_hist,input_apin);
                             xcors[s][xcor_i[s]][apin][dpin] += xcor;
                         }
                     }
@@ -276,23 +280,40 @@ int main()
             static_assert(AGGREGATION_NR_STEPS <= XCOR_DISPLAY_SAMPLES, "invalid AGGREGATION_NR_STEPS");
             if (t % AGGREGATION_NR_STEPS == 0)
             {
-                for (uint8_t dpin=0; dpin<p.nr_outputs; dpin++)
+                for (uint8_t apin=0; apin<NR_INPUTS+1; apin++)
                 {
-                    for (uint8_t apin=0; apin<p.nr_inputs; apin++)
+                    for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
                     {
                         for (int i=0;i<NR_BINS;i++)
                         {
                             for (int s=0; s<NR_SPEEDS;s++)
                             {
-                                float xcor = xcors[s][i][apin][dpin];
-                                
-                                if (USE_VARIANCE || MERGE_BIN_CNT > 1) xcor = xcor * xcor;
-                                merged_xcors[apin][dpin][i/MERGE_BIN_CNT] += xcor;
+                                if (apin < NR_INPUTS)
+                                {
+                                    float xcor = xcors[s][i][apin][dpin];
+                                    
+                                    if (USE_VARIANCE || MERGE_BIN_CNT > 1)
+                                    {
+                                        xcor = xcor * xcor;
+                                        
+//                                        // must be more correlated than to constant 0 to count -- removes dc bias
+//                                        xcor -= xcors[s][i][NR_INPUTS][dpin]*xcors[s][i][NR_INPUTS][dpin]; 
+//                                        if (xcor < 0) xcor = 0;
+                                    }
+                                    
+                                    merged_xcors[apin][dpin][i/MERGE_BIN_CNT] += xcor;
+
+//                                    if (s==0 && i==1) printf("%d %f %d\n", output_sum[dpin], xcor, xcors[s][i][NR_INPUTS][dpin]);
+                                }
 
                                 xcors[s][i][apin][dpin] = 0;
                             }
                         }
                     }
+                }
+                for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
+                {
+                    output_sum[dpin] = 0;
                 }
             }
 
