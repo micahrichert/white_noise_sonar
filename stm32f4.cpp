@@ -12,6 +12,7 @@
 
 constexpr int NOISE_LEVEL = 0; // add hysteresis to input when using analog/ADC
 constexpr bool USE_ANALOG_INPUT = true;
+constexpr bool USE_DIGITAL_FILTER = true;
 
 inline uint32_t pin_to_ADC(uint8_t apin)
 {
@@ -87,7 +88,81 @@ typedef struct
     uint32_t outputs[NR_OUTPUTS];
 } __attribute__((packed)) packet_t;
 
-constexpr int NR_SAMPLES = 0.1*XCOR_DISPLAY_TIME*SAMPLE_RATE;
+constexpr int NR_SAMPLES = XCOR_DISPLAY_TIME*SAMPLE_RATE;
+
+/*
+
+FIR filter designed with
+ http://t-filter.appspot.com
+
+sampling frequency: 100000 Hz
+
+fixed point precision: 12 bits
+
+* 0 Hz - 28300 Hz // causes a large dip at 25Khz
+  gain = 0
+  desired attenuation = -180 dB
+
+* 38000 Hz - 42000 Hz
+  gain = 1
+  desired ripple = 5 dB
+
+* 48000 Hz - 50000 Hz
+  gain = 0
+  desired attenuation = -100 dB
+*/
+constexpr int filter[] = {
+  -1,
+  1,
+  -3,
+  5,
+  -6,
+  2,
+  10,
+  -29,
+  49,
+  -56,
+  32,
+  32,
+  -123,
+  199,
+  -207,
+  110,
+  83,
+  -301,
+  437,
+  -400,
+  176,
+  155,
+  -448,
+  564,
+  -448,
+  155,
+  176,
+  -400,
+  437,
+  -301,
+  83,
+  110,
+  -207,
+  199,
+  -123,
+  32,
+  32,
+  -56,
+  49,
+  -29,
+  10,
+  2,
+  -6,
+  5,
+  -3,
+  1,
+  -1,
+};
+constexpr int FILTER_LEN = sizeof(filter)/sizeof(*filter);
+int filtered_input[NR_INPUTS][FILTER_LEN] = {0};
+int filtered_input_ind = 0;
 
 int main(void)
 {
@@ -103,6 +178,7 @@ int main(void)
     int32_t NOP_count = 0;
     uint32_t t = 0;
     uint32_t transmit_count = 0;
+    bool too_slow = false;
     
     setup();
     
@@ -163,6 +239,23 @@ int main(void)
 
                 packets[packet_id].inputs[apin] <<= 1;
 
+                if (USE_DIGITAL_FILTER)
+                {
+                    int j=0, i=filtered_input_ind;
+                    for (; i<FILTER_LEN; j++, i++)
+                    {
+                        filtered_input[apin][i] += filter[j]*tmp_in;
+                    }
+                    i -= FILTER_LEN;
+                    for (; j<FILTER_LEN; j++, i++)
+                    {
+                        filtered_input[apin][i] += filter[j]*tmp_in;
+                    }
+                    
+                    tmp_in = filtered_input[apin][i];
+                    filtered_input[apin][i] = 0;
+                }
+
                 if ((tmp_in - previous_input[apin] < NOISE_LEVEL) & (tmp_in - previous_input[apin] > -NOISE_LEVEL))
                     // if we don't exceed the required change threshold then just repeat the previous input value
                     packets[packet_id].inputs[apin] |= (packets[packet_id].inputs[apin]&0x2)>>1;
@@ -170,6 +263,12 @@ int main(void)
                     packets[packet_id].inputs[apin] |= tmp_in > previous_input[apin];
 
                 previous_input[apin] = tmp_in;
+            }
+            
+            if (USE_DIGITAL_FILTER)
+            {
+                filtered_input_ind++;
+                if (filtered_input_ind >= FILTER_LEN) filtered_input_ind=0;
             }
         } else {
             uint16_t in = gpio_port_read(GPIOA);
@@ -185,6 +284,8 @@ int main(void)
         // transmit every 32 steps because we are using variables of type uint32_t to store input and output data
         if (t % 32 == 0)
         {
+            if (too_slow) continue;  // don't transfer if too slow
+
             //transfer merged_xcors over serial using dma
             packets[packet_id].count = transmit_count;
             transmit_count += 1;
@@ -200,6 +301,7 @@ int main(void)
 
             // delta_time_us/1000000.0 < 32.0/SAMPLE_RATE
             if (((get_time_us() - start_time)*(SAMPLE_RATE/1000)) < (32*(1000000/1000))) NOP_count += 1;
+            else if (NOP_count == 0) too_slow = true;
             start_time = get_time_us();
 
             for (int tmp=0;tmp<NOP_count-40;tmp++) asm("nop");

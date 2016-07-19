@@ -62,7 +62,7 @@ if __name__ == '__main__':
     fft_cnt = 0
     while True:
         ins = []
-        for i in range(160000/32):
+        while len(ins) != (100000/32):
             cnt += 1
             count, inputs, outputs = read_packet(ser)
             if np.uint8(prev_count+1) != count:
@@ -74,8 +74,8 @@ if __name__ == '__main__':
             for j in range(nr_inputs):
                 bins = [np.fromstring(format(int(i[j]), '032b'), dtype=np.uint8)-ord('0') for i in ins]
                 inputs = np.array(bins).reshape(-1)
-                abs_fft[j] = np.abs(np.fft.fft(inputs-np.mean(inputs)))
-            fft_cnt = 1
+                abs_fft[j] += np.abs(np.fft.fft(inputs-np.mean(inputs)))
+            fft_cnt += 1
             plt.clf()
             for j in range(nr_inputs):
                 plt.subplot(1, nr_inputs, j+1)
