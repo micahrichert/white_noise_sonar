@@ -11,7 +11,7 @@
 #include "config.h"
 
 constexpr int NOISE_LEVEL = 0; // add hysteresis to input when using analog/ADC
-constexpr bool USE_ANALOG_INPUT = false;
+constexpr bool USE_ANALOG_INPUT = true;
 
 inline uint32_t pin_to_ADC(uint8_t apin)
 {
@@ -32,7 +32,7 @@ void setup()
     for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
     {
         gpio_mode_setup(GPIOB, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1<<dpin); // Use PB0...
-        gpio_set_output_options(GPIOB, GPIO_OTYPE_OD, GPIO_OSPEED_2MHZ, 1<<dpin); // Use PB0...
+        gpio_set_output_options(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_2MHZ, 1<<dpin); // Use PB0...
     }
     
 	rcc_periph_clock_enable(RCC_GPIOA);
@@ -87,7 +87,7 @@ typedef struct
     uint32_t outputs[NR_OUTPUTS];
 } __attribute__((packed)) packet_t;
 
-constexpr int NR_SAMPLES = XCOR_DISPLAY_TIME*SAMPLE_RATE;
+constexpr int NR_SAMPLES = 0.1*XCOR_DISPLAY_TIME*SAMPLE_RATE;
 
 int main(void)
 {
@@ -121,7 +121,7 @@ int main(void)
     {
         for (uint8_t dpin=0; dpin<NR_OUTPUTS; dpin++)
         {
-            ave_output[dpin] = NR_SAMPLES/2;
+            ave_output[dpin] = 0;//NR_SAMPLES/2;
         }
     }
 
@@ -137,9 +137,9 @@ int main(void)
             if (USE_AVE_OUTPUT)
             {
                 constexpr int RND_BITS = 1;
-                r = int((rnd>>(dpin*RND_BITS))&((1<<RND_BITS)-1))*2-((1<<RND_BITS)-1)-(ave_output[dpin]-NR_SAMPLES/2) > 0;
+                r = int((rnd>>(dpin*RND_BITS))&((1<<RND_BITS)-1))*2-((1<<RND_BITS)-1)-(ave_output[dpin]) > 0;
                 ave_output[dpin] *= (1.0-1.0/NR_SAMPLES);
-                ave_output[dpin] += r;
+                ave_output[dpin] += 2*r-1;
             } else {
                 r = (rnd&(1<<(dpin)))>>dpin;
             }
